@@ -12,6 +12,11 @@ from youtube_transcript_api import (
 )
 
 LANGUAGES=["en", "en-US", "en-GB","hi"]
+WINDOW_SECONDS = 75
+OVERLAP_SECONDS = 15
+
+
+
 _VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
 
@@ -62,6 +67,53 @@ def fetch_transcript(video_id : str)-> list[dict] :
 
     return snippets
 
+
+def fmt_ts(seconds : float) -> str :
+    """754 -> '12:34', 3725 -> 1:02:05 """
+
+    s = int(seconds)
+    h, rem = divmod(s , 3600)
+    m, sec = divmod(rem , 60)
+    return f"{h} : {m:02d} : {sec:02d}" if h else f"{m}:{sec:02d}"
+
+def chunk_transcript(snippets: list[dict] , window: int = WINDOW_SECONDS , overlap : int = OVERLAP_SECONDS) -> list[dict] :
+    """Group caption pieces into ~`window`-second chunks; neighbours share ~`overlap` seconds.
+
+    Each chunk: {"text", "start", "end", "chunk_index"}.
+    `start` is the real start time of the chunk's first caption, so it is safe to cite and seek to.
+    """
+    chunks : list[dict] = []
+    i , n = 0 , len(snippets) 
+    while i < n :
+        start = snippets[i]["start"]
+        j = i 
+
+        while j < n and snippets[j]["start"] < start + window:
+            j += 1 
+        j = max(j , i+1) # always take at least one piece
+        group = snippets[i:j]
+        end = group[-1]["start"] + group[-1]["duration"]
+        chunks.append(
+            {
+                "text" : " ".join(g["text"] for g in group),
+                "start" :start,
+                "end" :end ,
+                "chunk_index" :len(chunks),
+            }
+        )
+
+        if j >= n :
+            break
+
+        k = j 
+        while k-1 > i and snippets[k-1]["start"] >= end - overlap:
+            k -= 1
+
+        i = k # k > i , so we always move forward
+
+    return chunks
+
+
 if __name__ == "__main__":
 
     try:
@@ -73,9 +125,11 @@ if __name__ == "__main__":
 
     print(f"{len(data)} caption pieces")
 
-    for s in data[:5] :
-        print(f"{s['start']: 7.1f}s ({s['duration']:.1f}s)  {s['text']}")
+    chunks = chunk_transcript(data)
 
-    last = data[-1]
+    print(f"-> {len(chunks)} chunks (window={WINDOW_SECONDS}s , overlap={OVERLAP_SECONDS}s)\n")
 
-    print(f"Video length is about {last['start'] + last['duration'] :.0f}s")
+    for c in chunks[:3]:
+        print(f"[{fmt_ts(c['start'])} - {fmt_ts(c['end'])}]  {len(c['text'].split())} words")
+
+        print(f"  {c['text'][:150]}...\n")
