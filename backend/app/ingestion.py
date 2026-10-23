@@ -1,7 +1,7 @@
 """Step 1: validate a video ID and fetch its transcript from YouTube."""
 import re 
 import sys
-
+from langchain_core.documents import Document
 from youtube_transcript_api import (
     IpBlocked,
     NoTranscriptFound,
@@ -113,6 +113,23 @@ def chunk_transcript(snippets: list[dict] , window: int = WINDOW_SECONDS , overl
 
     return chunks
 
+# Function to convert the chunk to docement 
+
+def chunks_to_documents(video_id :str , chunks :list[dict]) ->list[Document] :
+    """Wrap each chunk in a LangChain Document. The timestamp lives in metadata."""
+    return [
+        Document(
+            page_content=c["text"],
+            metadata={
+                "video_id" :video_id,
+                "start": int(c["start"]),  # seconds: what the player seeks to
+                "end": int(c["end"]),
+                "ts": fmt_ts(c["start"]),  # display form, e.g. "12:34"
+                "chunk_index": c["chunk_index"],
+            }
+        )
+        for c in chunks
+    ]
 
 if __name__ == "__main__":
 
@@ -126,10 +143,12 @@ if __name__ == "__main__":
     print(f"{len(data)} caption pieces")
 
     chunks = chunk_transcript(data)
+    docs = chunks_to_documents(sys.argv[1] , chunks)
+
+
 
     print(f"-> {len(chunks)} chunks (window={WINDOW_SECONDS}s , overlap={OVERLAP_SECONDS}s)\n")
 
-    for c in chunks[:3]:
-        print(f"[{fmt_ts(c['start'])} - {fmt_ts(c['end'])}]  {len(c['text'].split())} words")
-
-        print(f"  {c['text'][:150]}...\n")
+    for d in docs[:3] :
+        print(d.metadata)
+        print(f"{d.page_content[:120]}....\n")
