@@ -10,11 +10,17 @@ from youtube_transcript_api import (
     VideoUnavailable,
     YouTubeTranscriptApi
 )
+from langchain_chroma import Chroma
+from langchain_ollama import OllamaEmbeddings
 
 LANGUAGES=["en", "en-US", "en-GB","hi"]
 WINDOW_SECONDS = 75
 OVERLAP_SECONDS = 15
 
+# model
+EMBED_MODEL= "mxbai-embed-large:latest"
+OLLAMA_URL = "http://127.0.0.1:11434"
+CHROMA_DIR = "./data/chroma"  # thewre vectors are saved on disk
 
 
 _VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
@@ -131,6 +137,32 @@ def chunks_to_documents(video_id :str , chunks :list[dict]) ->list[Document] :
         for c in chunks
     ]
 
+
+def get_embeddings() -> OllamaEmbeddings:
+    return OllamaEmbeddings(model=EMBED_MODEL , base_url=OLLAMA_URL)
+
+def collection_name(video_id :str) ->str :
+    # Chroma names must start and end with a letter/digit; video IDs may end in "-" or "_".
+    return f"yt_{video_id}_c"
+
+def get_vectorstore(video_id :str , embeddings) -> Chroma :
+    """One Chroma collection per video, saved under CHROMA_DIR."""
+    return Chroma(
+        collection_name=collection_name(video_id),
+        embedding_function=embeddings,
+        persist_directory=CHROMA_DIR,
+    )
+
+def store_documents(video_id : str , docs: list[Document] , embeddings) -> int:
+    """Embed the documents and save them. Fixed IDs mean re-running never creates duplicates."""
+    store = get_vectorstore(video_id , embeddings) 
+    ids = [f"{video_id}-{d.metadata['chunk_index']}" for d in docs]
+    store.add_documents(docs , ids=ids)
+    return len(docs)
+
+
+
+
 if __name__ == "__main__":
 
     try:
@@ -145,10 +177,16 @@ if __name__ == "__main__":
     chunks = chunk_transcript(data)
     docs = chunks_to_documents(sys.argv[1] , chunks)
 
+    print(f"->{len(docs)} documents. Embedding with {EMBED_MODEL} (first run can take a minute)...")
 
+    emb = get_embeddings()
+    n = store_documents(sys.argv[1] , docs , emb)
+    print(f"Stored {n} documents in {CHROMA_DIR}\n")
 
-    print(f"-> {len(chunks)} chunks (window={WINDOW_SECONDS}s , overlap={OVERLAP_SECONDS}s)\n")
+    # Try a search : 
+    query = sys.argv[2] if len(sys.argv) > 2 else "what is this video about?"
+    store = get_vectorstore(sys.argv[1] ,emb)
 
-    for d in docs[:3] :
-        print(d.metadata)
-        print(f"{d.page_content[:120]}....\n")
+    print(f"Search : {query!r}\n")
+    for d in store.similarity_search(query , k=3):
+        print(f"[{d.metadata['ts']}] {d.page_content[:150]}...\n")
