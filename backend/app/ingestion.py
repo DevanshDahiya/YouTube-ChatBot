@@ -13,6 +13,11 @@ from youtube_transcript_api import (
 from langchain_chroma import Chroma
 from langchain_ollama import OllamaEmbeddings
 
+import time 
+from . import cache
+
+
+
 LANGUAGES=["en", "en-US", "en-GB","hi"]
 WINDOW_SECONDS = 75
 OVERLAP_SECONDS = 15
@@ -161,32 +166,46 @@ def store_documents(video_id : str , docs: list[Document] , embeddings) -> int:
     return len(docs)
 
 
+def ingest(video_id :str , embeddings) ->dict :
+    """The whole pipeline, with caching. Safe to call many times for the same video"""
+    validate_video_id(video_id)
+
+    cached = cache.get_video(video_id)
+
+    if cached : # already doen : no youtube request , no embedding
+        return {"Video_id" : video_id , "cached" : True , "chunks" :cached["chunk_count"]}
+
+    snippets = fetch_transcript(video_id)
+    docs = chunks_to_documents(video_id , chunk_transcript(snippets))
+    store_documents(video_id , docs , embeddings)
+
+    # now store in teh cache
+    cache.save_video(video_id, snippets , len(docs))
+
+    return {"video_id" :  video_id  , "cached" : False , "chunks" : len(docs)}
+
+
 
 
 if __name__ == "__main__":
 
-    try:
-        data = fetch_transcript(sys.argv[1])
+    video_id = sys.argv[1] 
+    emb = get_embeddings()
+
+    t0 = time.perf_counter()
+
+    try :
+        result = ingest(video_id , emb)
 
     except IngestionError as e :
         print(f"[{e.code}] {e.message}")
         sys.exit(1)
 
-    print(f"{len(data)} caption pieces")
+    print(f"{result} took {time.perf_counter() - t0:.2f}s\n")
 
-    chunks = chunk_transcript(data)
-    docs = chunks_to_documents(sys.argv[1] , chunks)
+    query = sys.argv[2] if len(sys.argv) > 2 else "What is this video about?"
 
-    print(f"->{len(docs)} documents. Embedding with {EMBED_MODEL} (first run can take a minute)...")
+    print(f"Search: {query!r}\n")
 
-    emb = get_embeddings()
-    n = store_documents(sys.argv[1] , docs , emb)
-    print(f"Stored {n} documents in {CHROMA_DIR}\n")
-
-    # Try a search : 
-    query = sys.argv[2] if len(sys.argv) > 2 else "what is this video about?"
-    store = get_vectorstore(sys.argv[1] ,emb)
-
-    print(f"Search : {query!r}\n")
-    for d in store.similarity_search(query , k=3):
+    for d in get_vectorstore(video_id, emb).similarity_search(query , k = 3):    
         print(f"[{d.metadata['ts']}] {d.page_content[:150]}...\n")
