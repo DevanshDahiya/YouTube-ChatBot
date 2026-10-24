@@ -3,11 +3,14 @@
 import sys
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_ollama import ChatOllama
 
-from .ingestion import get_embeddings , get_vectorstore
+from .ingestion import OLLAMA_URL , get_embeddings , get_vectorstore
 
 # no. of chunks to retrive per question
 TOP_K = 5 
+LLM_MODEL = "qwen2.5:3b"
+NUM_CTX = 4096 # context window ; Ollama's default can be too smalll adn silentlt cuts teh prompt
 
 SYSTEM_PROMPT = """You answer questions about ONE YouTube video using ONLY the transcript excerpts below.
 Each excerpt starts with its timestamp in square brackets, like [12:34].
@@ -36,14 +39,27 @@ def format_context(docs : list[Document]) ->str :
     return "\n\n".join(f"[{d.metadata['ts']}] {d.page_content}" for d in docs)
 
 
+def get_llm() -> ChatOllama:
+    # temp = 0 : we want the answer taht follows the vector db , not a creative one.
+    return ChatOllama(model=LLM_MODEL , base_url=OLLAMA_URL , temperature=0, num_ctx=NUM_CTX)
+
+
+def answer(video_id :str , question : str , embeddings , llm=None) ->dict :
+    """Retrieve -> prompt -> LLM. Returns the answer text and the chunks it was based on."""
+    docs = retrieve(video_id , question , embeddings)
+    chain = ANSWER_PROMPT | (llm or get_llm())
+
+    reply = chain.invoke({"context" :format_context(docs) , "question" : question})
+    return {"answer" : reply.content , "sources" : docs}
+
+
+
 if __name__ == "__main__":
 
     video_id , question = sys.argv[1] ,sys.argv[2]
 
-    docs = retrieve(video_id , question , get_embeddings())
-    context = format_context(docs)
+    result = answer(video_id , question , get_embeddings())
 
-    print(f"Retrieved {len(docs)} chunks , about {len(context.split())} words of context\n")
-
-    for m in ANSWER_PROMPT.format_messages(context= context , question= question):
-        print(f"--- {m.type.upper()} --- \n{m.content}\n")
+    print(f"\nQ: {question}\n")
+    print(f"A: {result['answer']}\n")
+    print("Retrieved from: " + ", ".join(f"[{d.metadata['ts']}]" for d in result["sources"]))
