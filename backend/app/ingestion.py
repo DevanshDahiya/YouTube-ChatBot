@@ -1,6 +1,7 @@
 """Step 1: validate a video ID and fetch its transcript from YouTube."""
 import re 
 import sys
+import threading
 from langchain_core.documents import Document
 from youtube_transcript_api import (
     IpBlocked,
@@ -27,6 +28,8 @@ EMBED_MODEL= "mxbai-embed-large:latest"
 OLLAMA_URL = "http://127.0.0.1:11434"
 CHROMA_DIR = "./data/chroma"  # thewre vectors are saved on disk
 
+# one lock per video
+_locks : dict[str , threading.Lock] = {} 
 
 _VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
@@ -170,19 +173,20 @@ def ingest(video_id :str , embeddings) ->dict :
     """The whole pipeline, with caching. Safe to call many times for the same video"""
     validate_video_id(video_id)
 
-    cached = cache.get_video(video_id)
+    with _locks.setdefault(video_id , threading.Lock()):
+        cached = cache.get_video(video_id)
 
-    if cached : # already doen : no youtube request , no embedding
-        return {"Video_id" : video_id , "cached" : True , "chunks" :cached["chunk_count"]}
+        if cached : # already doen : no youtube request , no embedding
+            return {"Video_id" : video_id , "cached" : True , "chunks" :cached["chunk_count"]}
 
-    snippets = fetch_transcript(video_id)
-    docs = chunks_to_documents(video_id , chunk_transcript(snippets))
-    store_documents(video_id , docs , embeddings)
+        snippets = fetch_transcript(video_id)
+        docs = chunks_to_documents(video_id , chunk_transcript(snippets))
+        store_documents(video_id , docs , embeddings)
 
-    # now store in teh cache
-    cache.save_video(video_id, snippets , len(docs))
+        # now store in teh cache
+        cache.save_video(video_id, snippets , len(docs))
 
-    return {"video_id" :  video_id  , "cached" : False , "chunks" : len(docs)}
+        return {"video_id" :  video_id  , "cached" : False , "chunks" : len(docs)}
 
 
 
