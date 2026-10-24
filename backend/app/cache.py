@@ -15,7 +15,12 @@ CREATE TABLE IF NOT EXISTS videos (
     duration_s  REAL NOT NULL,
     transcript  TEXT NOT NULL,
     created_at  REAL NOT NULL
-)
+);
+CREATE TABLE IF NOT EXISTS summaries(
+    video_id TEXT  PRIMARY KEY ,
+    summary TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
 """
 
 
@@ -25,7 +30,8 @@ def _conn() :
     os.makedirs(os.path.dirname(CACHE_DB) or ".", exist_ok = True)
     con = sqlite3.connect(CACHE_DB)
     con.row_factory = sqlite3.Row
-    con.execute(SCHEMA)
+    # execute for one statement , and executescript for mor ethan one statement
+    con.executescript(SCHEMA) 
 
     try :
         yield con
@@ -58,4 +64,15 @@ def save_video(video_id : str , snippets :list[dict] , chunk_count: int) -> None
             "VALUES (? ,? ,? ,? ,?)",
             (video_id , chunk_count , duration, json.dumps(snippets) , time.time()),
         )
-        
+
+def get_summary(video_id: str) -> dict | None :
+    with _conn() as con :
+        row = con.execute("SELECT summary FROM summaries WHERE video_id =?" , (video_id , )).fetchone()
+    return json.loads(row["summary"]) if row else None
+
+def save_summary(video_id: str , summary : dict) ->None :
+    with _conn() as con :
+        con.execute(
+            "INSERT OR REPLACE INTO summaries (video_id , summary ,created_at) VALUES(?,?,?)",
+            (video_id , json.dumps(summary) , time.time()),
+        )

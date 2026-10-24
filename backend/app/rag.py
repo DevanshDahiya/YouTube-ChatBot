@@ -7,12 +7,26 @@ from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_ollama import ChatOllama
 
-from .ingestion import OLLAMA_URL ,fmt_ts, get_embeddings , get_vectorstore
-
+from .ingestion import OLLAMA_URL, chunk_transcript ,fmt_ts, get_embeddings , get_vectorstore
+from .import cache
 # no. of chunks to retrive per question
 TOP_K = 5 
 LLM_MODEL = "qwen2.5:3b"
 NUM_CTX = 4096 # context window ; Ollama's default can be too smalll adn silentlt cuts teh prompt
+
+SECTION_PROMPT = ChatPromptTemplate.from_template(
+    "Below is one part of a video transcript. \n"
+    "Write  1 or 2 short bullet points (max 20 words each) about its main idea. use only this text.\n"
+    "Output only the bullets, each starting with '- '.\n\n{text}"
+)
+OVERVIEW_PROMPT = ChatPromptTemplate.from_template(
+    "Below are notes from a video, in order. Write a 3 to 4 sentence overview of what the video is about."
+    "Use only the notes. Output only the overview. \n\n{notes}"
+)
+# Summarises in 5-minute sections
+SECTION_SECONDS = 300
+
+
 
 SYSTEM_PROMPT = """You answer questions about ONE YouTube video using ONLY the transcript excerpts below.
 Each excerpt starts with its timestamp in square brackets, like [12:34].
@@ -90,13 +104,17 @@ def verify_citations(text: str , docs : list[Document]) -> dict:
     return {"text": cleaned, "citations": sorted(valid), "invalid": invalid}
 
 
-
-
-
-
-def get_llm() -> ChatOllama:
+def get_llm(max_tokens : int | None = None) -> ChatOllama:
     # temp = 0 : we want the answer taht follows the vector db , not a creative one.
-    return ChatOllama(model=LLM_MODEL , base_url=OLLAMA_URL , temperature=0, num_ctx=NUM_CTX)
+    # # num_predict caps the reply length so a looping model cannot run forever.
+    return ChatOllama(
+        model=LLM_MODEL,
+        base_url=OLLAMA_URL,
+        temperature=0,
+        num_ctx=NUM_CTX,
+        num_predict=max_tokens,
+        client_kwargs={"timeout": 180},  # seconds; fail loudly instead of hanging
+    )
 
 
 def answer(video_id :str , question : str , embeddings , llm=None) ->dict :
@@ -149,9 +167,64 @@ def stream_answer(video_id :str , question :str , embeddings , llm=None):
     }
 
 
+
+def _bullets(text :str) ->list[str]:
+    """Pull '- bullet' / '* bullet' / '1. bullet' lines out of a model reply."""
+    out = []
+    for line in text.splitlines():
+        line = re.sub(r"^\s*(?:[-*\u2022]|\d+[.)])\s*", "", line).strip()
+        if line :
+            out.append(line)
+    return out 
+
+
+def build_summary(video_id :str , llm = None , on_progress=None) ->dict:
+    """Map-reduce summary. Returns {"overview": str, "key_points": [{"start","ts","text"}]}.
+
+    Timestamps on key points come from the code (each section's real start), not from the model.
+    """
+
+    cached = cache.get_summary(video_id)
+    if cached :
+        return cached
+
+    video = cache.get_video(video_id)
+
+    if not video :
+        raise LookupError("Video not ingested yet. Run ingestion first")
+
+    llm = llm or get_llm(max_tokens=200) 
+    sections = chunk_transcript(video["transcript"] , window= SECTION_SECONDS , overlap=0)
+
+    key_points = []
+    for i, sec in enumerate(sections, 1):
+        if on_progress:
+            on_progress(i, len(sections))
+        reply = (SECTION_PROMPT | llm).invoke({"text": sec["text"]})
+        for b in _bullets(reply.content)[:2]:
+            key_points.append({"start": int(sec["start"]), "ts": fmt_ts(sec["start"]), "text": b})
+
+    notes = "\n".join(f"- {k['text']}" for k in key_points)
+    overview = (OVERVIEW_PROMPT | llm).invoke({"notes": notes}).content.strip()
+
+    summary = {"overview": overview, "key_points": key_points}
+    cache.save_summary(video_id, summary)
+    return summary
+
+
 if __name__ == "__main__":
 
     video_id , question = sys.argv[1] ,sys.argv[2]
+
+    if question == "--summary":  # python -m app.rag VIDEO_ID --summary
+        t0 = time.perf_counter()
+        result = build_summary(video_id, on_progress=lambda i, n: print(f"summarizing section {i}/{n}...", flush=True))
+        print(f"\nOverview:\n{result['overview']}\n\nKey points:")
+        for k in result["key_points"]:
+            print(f"  [{k['ts']}] {k['text']}")
+        print(f"\ndone in {time.perf_counter() - t0:.1f}s (run again: instant, it is cached)")
+        sys.exit(0)
+
 
     t0 = time.perf_counter()
     first_token = None
