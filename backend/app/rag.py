@@ -2,6 +2,7 @@
 import re
 import sys
 import time 
+import threading
 
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
@@ -26,6 +27,8 @@ OVERVIEW_PROMPT = ChatPromptTemplate.from_template(
 # Summarises in 5-minute sections
 SECTION_SECONDS = 300
 
+# one lock per video
+_summary_locks : dict[str , threading.Lock] = {}
 
 
 SYSTEM_PROMPT = """You answer questions about ONE YouTube video using ONLY the transcript excerpts below.
@@ -185,33 +188,33 @@ def build_summary(video_id :str , llm = None , on_progress=None) ->dict:
 
     Timestamps on key points come from the code (each section's real start), not from the model.
     """
+    with _summary_locks.setdefault(video_id , threading.Lock()):
+        cached = cache.get_summary(video_id)
+        if cached :
+            return cached
 
-    cached = cache.get_summary(video_id)
-    if cached :
-        return cached
+        video = cache.get_video(video_id)
 
-    video = cache.get_video(video_id)
+        if not video :
+            raise LookupError("Video not ingested yet. Run ingestion first")
 
-    if not video :
-        raise LookupError("Video not ingested yet. Run ingestion first")
+        llm = llm or get_llm(max_tokens=200) 
+        sections = chunk_transcript(video["transcript"] , window= SECTION_SECONDS , overlap=0)
 
-    llm = llm or get_llm(max_tokens=200) 
-    sections = chunk_transcript(video["transcript"] , window= SECTION_SECONDS , overlap=0)
+        key_points = []
+        for i, sec in enumerate(sections, 1):
+            if on_progress:
+                on_progress(i, len(sections))
+            reply = (SECTION_PROMPT | llm).invoke({"text": sec["text"]})
+            for b in _bullets(reply.content)[:2]:
+                key_points.append({"start": int(sec["start"]), "ts": fmt_ts(sec["start"]), "text": b})
 
-    key_points = []
-    for i, sec in enumerate(sections, 1):
-        if on_progress:
-            on_progress(i, len(sections))
-        reply = (SECTION_PROMPT | llm).invoke({"text": sec["text"]})
-        for b in _bullets(reply.content)[:2]:
-            key_points.append({"start": int(sec["start"]), "ts": fmt_ts(sec["start"]), "text": b})
+        notes = "\n".join(f"- {k['text']}" for k in key_points)
+        overview = (OVERVIEW_PROMPT | llm).invoke({"notes": notes}).content.strip()
 
-    notes = "\n".join(f"- {k['text']}" for k in key_points)
-    overview = (OVERVIEW_PROMPT | llm).invoke({"notes": notes}).content.strip()
-
-    summary = {"overview": overview, "key_points": key_points}
-    cache.save_summary(video_id, summary)
-    return summary
+        summary = {"overview": overview, "key_points": key_points}
+        cache.save_summary(video_id, summary)
+        return summary
 
 
 if __name__ == "__main__":

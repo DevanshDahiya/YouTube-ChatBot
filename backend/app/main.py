@@ -6,7 +6,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel , Field
 
 from .ingestion import IngestionError , get_embeddings , ingest
-from .rag import stream_answer
+from .rag import stream_answer , build_summary
 
 
 app = FastAPI(title="YouTube-ChatBot")
@@ -86,3 +86,18 @@ def ask_route(req : AskRequest):
             "X-Accel-Buffering" :"no"
         },
     )
+
+
+@app.get("/summary/{video_id}")
+def summary_route(video_id: str):
+    # The very first call for a video can take a while (one model call per 5-minute section)
+    # Later calls are cached.
+
+    try:
+        ingest(video_id ,embeddings())
+        return {"video_id" : video_id , **build_summary(video_id)}
+    except IngestionError as e :
+        raise HTTPException(STATUS.get(e.code , 500) , {"code" : e.code , "message" : e.message})
+    except LookupError as e :
+        raise HTTPException(404 , {"code" : "not_ingested" ,"message":str(e)})
+    
