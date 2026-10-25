@@ -1,0 +1,60 @@
+/* Everything here applies ONLY inside our Shadow DOM, so YouTube's CSS cannot touch it and ours cannot leak out. */
+
+:host {
+  display: block;
+  margin-bottom: 16px;
+  --bg: #ffffff;
+  --text: #0f0f0f;
+  --muted: #606060;
+  --border: #d9d9d9;
+  --accent: #065fd4;
+}
+
+/* YouTube marks dark mode with a "dark" attribute on <html>. */
+:host-context(html[dark]) {
+  --bg: #212121;
+  --text: #f1f1f1;
+  --muted: #aaaaaa;
+  --border: #3f3f3f;
+  --accent: #3ea6ff;
+}
+
+/* Fallback when we could not find YouTube's right-hand column: float over the page. */
+:host(.floating) {
+  position: fixed;
+  top: 72px;
+  right: 16px;
+  width: 360px;
+  z-index: 2147483000;
+}
+
+.panel {
+  box-sizing: border-box;
+  min-height: 120px;
+  padding: 12px 14px;
+  font-family: Roboto, Arial, sans-serif;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-weight: 500;
+  font-size: 16px;
+}
+
+.video-id {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.status {
+  color: var(--muted);
+}
