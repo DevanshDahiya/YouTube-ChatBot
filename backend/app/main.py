@@ -15,12 +15,7 @@ app = FastAPI(title="YouTube-ChatBot")
 app.add_middleware(CORSMiddleware , allow_origins=["*"] , allow_methods=["*"] , allow_headers=["*"])
 
 # ingestion error code -> http status
-STATUS = {
-    "invalid_video_id" : 400,
-    "video_unavailable" : 404,
-    "no_caption" : 422 ,
-    "blocked" :503
-}
+STATUS = {"invalid_video_id": 400, "video_unavailable": 404, "no_captions": 422, "blocked": 503}
 
 @lru_cache
 def embeddings():
@@ -32,7 +27,7 @@ class IngestionRequest(BaseModel):
 
 class AskRequest(BaseModel):
     video_id : str 
-    question : str = Field(min_length=1 , max_Length=2000)
+    question : str = Field(min_length=1 , max_length=2000)
     chat_history: list[dict] = []  # used to handle the follow up question
 
 
