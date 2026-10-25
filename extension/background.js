@@ -1,18 +1,35 @@
 // Step 18: the service worker. It is the only part that talks to the backend.
 // Content scripts send it a message; it calls the API and sends back a plain result.
 
+// The service worker. It is the only part that talks to the backend.
+// Content scripts send it a message (or open a port for streaming); it calls the API and replies with plain results.
+
 const BACKEND_URL = "http://127.0.0.1:8000"; // swapped for the deployed URL on Day 3
 
-// Always resolves to {ok: true, data} or {ok: false, error: {code, message}}. Never throws.
+// Turn a failed HTTP response into {code, message}.
+// Our backend sends {"detail": {"code", "message"}}. FastAPI's own validation errors send a LIST of problems.
+function toError(status, body) {
+  const detail = body && body.detail;
+  if (detail && detail.code) return detail;
+  if (Array.isArray(detail) && detail.length > 0) {
+    const first = detail[0]; // e.g. {loc: ["body", "video_id"], msg: "Field required"}
+    return { code: "bad_request", message: `Bad request: ${(first.loc || []).join(".")} ${first.msg}` };
+  }
+  return { code: "http_" + status, message: `Backend error (${status}).` };
+}
+
+const UNREACHABLE = {
+  code: "backend_unreachable",
+  message: "Can't reach the backend. Is it running on 127.0.0.1:8000?",
+};
+
+// One-shot requests. Always resolves to {ok: true, data} or {ok: false, error: {code, message}}. Never throws.
 async function api(path, options) {
   let response;
   try {
     response = await fetch(BACKEND_URL + path, options);
   } catch {
-    return {
-      ok: false,
-      error: { code: "backend_unreachable", message: "Can't reach the backend. Is it running on 127.0.0.1:8000?" },
-    };
+    return { ok: false, error: UNREACHABLE };
   }
 
   let body = null;
@@ -23,19 +40,7 @@ async function api(path, options) {
   }
 
   if (response.ok) return { ok: true, data: body };
-
-  // Our backend sends {"detail": {"code", "message"}}. FastAPI's own validation errors send a LIST of problems.
-  const detail = body && body.detail;
-  let error;
-  if (detail && detail.code) {
-    error = detail;
-  } else if (Array.isArray(detail) && detail.length > 0) {
-    const first = detail[0]; // e.g. {loc: ["body", "video_id"], msg: "Field required"}
-    error = { code: "bad_request", message: `Bad request: ${(first.loc || []).join(".")} ${first.msg}` };
-  } else {
-    error = { code: "http_" + response.status, message: `Backend error (${response.status}).` };
-  }
-  return { ok: false, error };
+  return { ok: false, error: toError(response.status, body) };
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -52,4 +57,82 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   return false;
+});
+
+// ---- Streaming answers (Step 20) -------------------------------------------------------------
+
+// Turn one Server-Sent Event block ("event: token\ndata: {...}") into {type: "token", ...data}.
+function parseSseBlock(block) {
+  let name = "message";
+  const dataLines = [];
+  for (const line of block.split("\n")) {
+    if (line.startsWith("event:")) name = line.slice(6).trim();
+    else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+  }
+  if (dataLines.length === 0) return null;
+  try {
+    return { type: name, ...JSON.parse(dataLines.join("\n")) };
+  } catch {
+    return null; // a broken event is skipped instead of breaking the whole answer
+  }
+}
+
+// Runs the /ask request and forwards every event to the content script through the port.
+async function streamAnswer(port, { videoId, question, history }) {
+  let open = true;
+  const controller = new AbortController();
+  port.onDisconnect.addListener(() => {
+    open = false;
+    controller.abort(); // the tab closed or moved to another video: stop reading
+  });
+  const send = (message) => {
+    if (open) port.postMessage(message);
+  };
+  // Messages sent through the port count as activity, so Chrome does not stop this worker during a slow answer.
+  const keepAlive = setInterval(() => send({ type: "ping" }), 20000);
+
+  try {
+    const response = await fetch(BACKEND_URL + "/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ video_id: videoId, question, chat_history: history || [] }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      let body = null;
+      try {
+        body = await response.json();
+      } catch {
+        // keep null
+      }
+      send({ type: "error", message: toError(response.status, body).message });
+      return;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+      let end;
+      while ((end = buffer.indexOf("\n\n")) !== -1) {
+        const event = parseSseBlock(buffer.slice(0, end));
+        buffer = buffer.slice(end + 2);
+        if (event) send(event);
+      }
+    }
+  } catch {
+    send({ type: "error", message: open ? UNREACHABLE.message : "" });
+  } finally {
+    clearInterval(keepAlive);
+    send({ type: "closed" });
+  }
+}
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== "ask") return;
+  port.onMessage.addListener((message) => streamAnswer(port, message));
 });

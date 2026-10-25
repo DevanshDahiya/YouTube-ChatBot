@@ -11,6 +11,7 @@ const SIDEBAR_CSS = `
   --muted: #606060;
   --border: #d9d9d9;
   --accent: #065fd4;
+  --soft: #f2f2f2;
 }
 
 /* YouTube marks dark mode with a "dark" attribute on <html>. */
@@ -20,6 +21,7 @@ const SIDEBAR_CSS = `
   --muted: #aaaaaa;
   --border: #3f3f3f;
   --accent: #3ea6ff;
+  --soft: #2d2d2d;
 }
 
 /* Fallback when we could not find YouTube's right-hand column: float over the page. */
@@ -80,7 +82,7 @@ const SIDEBAR_CSS = `
 }
 
 .summary {
-  max-height: 340px;
+  max-height: 240px;
   margin-top: 10px;
   padding-right: 4px;
   overflow-y: auto;
@@ -133,10 +135,98 @@ const SIDEBAR_CSS = `
   background: var(--accent);
   color: var(--bg);
 }
+
+.chat {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.messages {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 260px;
+  margin-bottom: 8px;
+  overflow-y: auto;
+}
+
+.messages:empty {
+  display: none;
+}
+
+.msg {
+  padding: 8px 10px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border-radius: 10px;
+}
+
+.msg.user {
+  align-self: flex-end;
+  max-width: 85%;
+  color: var(--bg);
+  background: var(--accent);
+}
+
+.msg.assistant {
+  align-self: flex-start;
+  background: var(--soft);
+}
+
+.msg.pending {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.msg.error {
+  color: #d93025;
+}
+
+.composer {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.composer textarea {
+  flex: 1;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  font: inherit;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  resize: none;
+}
+
+.composer textarea:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.composer button {
+  padding: 8px 12px;
+  font: inherit;
+  color: var(--bg);
+  background: var(--accent);
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.composer button:disabled,
+.composer textarea:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 `;
 
 const Sidebar = (() => {
   let host = null; // the element we put in the page
+  let askHandler = null; // called with the question text when the user sends one
   const els = {}; // references to parts we update later
 
   // Put our CSS inside the shadow root. A constructed stylesheet is not affected by the page's
@@ -174,6 +264,13 @@ const Sidebar = (() => {
         <div class="section-title">Key points</div>
         <ul class="points"></ul>
       </div>
+      <div class="chat">
+        <div class="messages"></div>
+        <form class="composer">
+          <textarea rows="2" placeholder="Preparing this video..." disabled></textarea>
+          <button type="submit" disabled>Send</button>
+        </form>
+      </div>
     `; // static text only: nothing from the page or the user is inserted as HTML
 
     applyStyles(root);
@@ -185,6 +282,29 @@ const Sidebar = (() => {
     els.summary = panel.querySelector(".summary");
     els.overview = panel.querySelector(".overview");
     els.points = panel.querySelector(".points");
+    els.messages = panel.querySelector(".messages");
+    els.form = panel.querySelector(".composer");
+    els.input = panel.querySelector(".composer textarea");
+    els.send = panel.querySelector(".composer button");
+
+    // YouTube has keyboard shortcuts (space, k, f, m, arrows...). Keep what we type from reaching them.
+    for (const type of ["keydown", "keyup", "keypress"]) {
+      els.input.addEventListener(type, (event) => event.stopPropagation());
+    }
+    // Enter sends, Shift+Enter makes a new line. (isComposing: do not send while an input method is mid-word.)
+    els.input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+        event.preventDefault();
+        els.form.requestSubmit();
+      }
+    });
+    els.form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const question = els.input.value.trim();
+      if (!question || els.input.disabled || !askHandler) return;
+      els.input.value = "";
+      askHandler(question);
+    });
   }
 
   // The right-hand column, but ONLY when YouTube is really showing it beside the video (wide window).
@@ -218,6 +338,8 @@ const Sidebar = (() => {
       setSummary(null);
       setSummaryStatus("");
       els.notice.textContent = "";
+      clearChat();
+      setChatEnabled(false, "Preparing this video...");
     }
     els.videoId.textContent = videoId;
     mount();
@@ -277,10 +399,77 @@ const Sidebar = (() => {
     noticeTimer = setTimeout(() => (els.notice.textContent = ""), 3500);
   }
 
+  // ---- Chat (Step 20) ----
+
+  function onAsk(handler) {
+    askHandler = handler;
+  }
+
+  function scrollChat() {
+    els.messages.scrollTop = els.messages.scrollHeight;
+  }
+
+  function addUserMessage(text) {
+    const message = document.createElement("div");
+    message.className = "msg user";
+    message.textContent = text; // text only, never HTML
+    els.messages.append(message);
+    scrollChat();
+  }
+
+  // Adds an empty assistant bubble and returns a small handle to fill it as the answer streams in.
+  function startAssistantMessage() {
+    const message = document.createElement("div");
+    message.className = "msg assistant pending";
+    message.textContent = "Thinking...";
+    els.messages.append(message);
+    scrollChat();
+    return {
+      setText(text) {
+        message.classList.remove("pending");
+        message.textContent = text; // text only: the answer comes from a language model
+        scrollChat();
+      },
+      setError(text) {
+        message.classList.remove("pending");
+        message.classList.add("error");
+        message.textContent = text;
+        scrollChat();
+      },
+      isPending: () => message.classList.contains("pending"),
+      hasError: () => message.classList.contains("error"),
+    };
+  }
+
+  function clearChat() {
+    els.messages.replaceChildren();
+  }
+
+  // Turn the input on or off. `hint` is the grey text shown inside it while it is off.
+  function setChatEnabled(enabled, hint) {
+    if (!host) return;
+    els.input.disabled = !enabled;
+    els.send.disabled = !enabled;
+    els.input.placeholder = enabled ? "Ask about this video..." : hint || "Please wait...";
+  }
+
   // YouTube re-renders its page and the window can be resized: re-check the placement regularly.
   function keepAttached() {
     if (host) mount();
   }
 
-  return { show, hide, setStatus, setSummaryStatus, setSummary, notice, keepAttached, els };
+  return {
+    show,
+    hide,
+    setStatus,
+    setSummaryStatus,
+    setSummary,
+    notice,
+    onAsk,
+    addUserMessage,
+    startAssistantMessage,
+    setChatEnabled,
+    keepAttached,
+    els,
+  };
 })();

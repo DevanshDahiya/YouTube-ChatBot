@@ -1,6 +1,10 @@
 // Detects the current video, even though YouTube never reloads the page, and drives the sidebar.
+// Detects the current video, even though YouTube never reloads the page, and drives the sidebar.
 
 let currentVideoId = null;
+let activePort = null; // the open connection while an answer is streaming
+let chatHistory = []; // [{role: "user" | "assistant", content}] for the current video
+let videoReady = false; // true once the backend has finished preparing this video
 
 function getVideoId() {
   const url = new URL(location.href);
@@ -47,6 +51,58 @@ async function loadSummary(videoId) {
   }
 }
 
+// Called when the chat is over (answer finished, failed, or was cut off).
+function endChat(answer) {
+  if (answer.isPending()) answer.setError("No answer received. Please try again.");
+  activePort = null;
+  Sidebar.setChatEnabled(videoReady, "This video isn't ready.");
+}
+
+// Called by the sidebar when the user sends a question. Streams the answer through a long-lived port.
+function askQuestion(question) {
+  const videoId = currentVideoId;
+  if (!videoId || activePort) return; // one question at a time
+  Sidebar.addUserMessage(question);
+  const answer = Sidebar.startAssistantMessage();
+  Sidebar.setChatEnabled(false, "Waiting for the answer...");
+
+  let port;
+  try {
+    port = chrome.runtime.connect({ name: "ask" });
+  } catch {
+    answer.setError("The extension was reloaded. Refresh this page.");
+    endChat(answer);
+    return;
+  }
+  activePort = port;
+
+  let streamed = "";
+  let gotFinal = false;
+  port.onMessage.addListener((event) => {
+    if (port !== activePort) return; // an old stream: ignore it
+    if (event.type === "token") {
+      streamed += event.text;
+      answer.setText(streamed);
+    } else if (event.type === "final") {
+      gotFinal = true;
+      answer.setText(event.answer); // the citation-checked version replaces the raw stream
+      chatHistory.push({ role: "user", content: question }, { role: "assistant", content: event.answer });
+    } else if (event.type === "error") {
+      if (event.message) answer.setError(event.message);
+    } else if (event.type === "closed") {
+      if (!gotFinal && streamed && !answer.hasError()) {
+        answer.setText(streamed + "\n\n(The answer was cut off. Please try again.)");
+      }
+      port.disconnect();
+      endChat(answer);
+    }
+  });
+  port.onDisconnect.addListener(() => {
+    if (port === activePort) endChat(answer);
+  });
+  port.postMessage({ videoId, question, history: chatHistory.slice(-6) });
+}
+
 async function prepareVideo(videoId) {
   Sidebar.setStatus("Preparing this video...");
   const result = await callBackground({ type: "ingest", videoId });
@@ -54,14 +110,25 @@ async function prepareVideo(videoId) {
   if (result.ok) {
     const { chunks, cached } = result.data;
     Sidebar.setStatus(`Ready \u00b7 ${chunks} sections${cached ? " (already prepared)" : ""}`);
+    videoReady = true;
+    Sidebar.setChatEnabled(true);
     loadSummary(videoId);
   } else {
     Sidebar.setStatus(result.error.message, true);
+    Sidebar.setChatEnabled(false, "This video can't be used.");
   }
 }
 
 function onVideoChanged(videoId) {
   console.log("[YT ChatBot] video changed:", videoId);
+  // Anything belonging to the previous video stops here.
+  if (activePort) {
+    const port = activePort;
+    activePort = null;
+    port.disconnect(); // tells the background worker to stop reading the old answer
+  }
+  chatHistory = [];
+  videoReady = false;
   if (videoId) {
     Sidebar.show(videoId);
     prepareVideo(videoId);
@@ -76,6 +143,8 @@ function checkVideo() {
   currentVideoId = id;
   onVideoChanged(id);
 }
+
+Sidebar.onAsk(askQuestion);
 
 // 1) YouTube fires this on `document` every time its in-page navigation finishes.
 document.addEventListener("yt-navigate-finish", checkVideo);
