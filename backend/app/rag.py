@@ -29,11 +29,12 @@ SECTION_SECONDS = 300
 
 
 SYSTEM_PROMPT = """You answer questions about ONE YouTube video using ONLY the transcript excerpts below.
-Each excerpt starts with its timestamp in square brackets, like [12:34].
+Each excerpt starts with its timestamp in square brackets.
 
 Rules:
 - Use only the excerpts. If the answer is not in them, say: "I couldn't find that in the video."
-- End EVERY sentence of your answer with the timestamp of the excerpt it came from, copied exactly, like [12:34].
+- Answer in the SAME LANGUAGE as the question. Write your own short answer: do not copy the excerpts word for word.
+- End EVERY sentence of your answer with the timestamp of the excerpt it came from, copied exactly from that excerpt's label.
 - Only cite timestamps that appear in the excerpts. Never invent one.
 - Keep the answer short: 2 to 4 sentences.
 
@@ -53,7 +54,8 @@ ANSWER_PROMPT = ChatPromptTemplate.from_messages(
         (
             "human",
             "{question}\n\n"
-            "(Answer using only the excerpts, and end every sentence with a timestamp like [12:34].)",
+            "(Answer using only the excerpts, in the language of the question, "
+            "and end every sentence with a timestamp copied from an excerpt label.)",
         ),
     ]
 )
