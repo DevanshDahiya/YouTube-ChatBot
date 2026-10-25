@@ -8,11 +8,37 @@ function getVideoId() {
   return url.searchParams.get("v");
 }
 
-// Later steps will ingest the video and fill the sidebar here.
+// Ask the background worker to do something. Always resolves to {ok, data} or {ok: false, error}.
+async function callBackground(message) {
+  try {
+    const reply = await chrome.runtime.sendMessage(message);
+    return reply || { ok: false, error: { code: "no_reply", message: "No reply from the extension." } };
+  } catch {
+    // Happens when the extension was reloaded while this tab stayed open.
+    return { ok: false, error: { code: "extension_error", message: "The extension was reloaded. Refresh this page." } };
+  }
+}
+
+async function prepareVideo(videoId) {
+  Sidebar.setStatus("Preparing this video...");
+  const result = await callBackground({ type: "ingest", video_id: videoId });
+  if (videoId !== currentVideoId) return; // you moved to another video while we waited: drop this answer
+  if (result.ok) {
+    const { chunks, cached } = result.data;
+    Sidebar.setStatus(`Ready \u00b7 ${chunks} sections${cached ? " (already prepared)" : ""}`);
+  } else {
+    Sidebar.setStatus(result.error.message, true);
+  }
+}
+
 function onVideoChanged(videoId) {
   console.log("[YT ChatBot] video changed:", videoId);
-  if (videoId) Sidebar.show(videoId);
-  else Sidebar.hide();
+  if (videoId) {
+    Sidebar.show(videoId);
+    prepareVideo(videoId);
+  } else {
+    Sidebar.hide();
+  }
 }
 
 function checkVideo() {

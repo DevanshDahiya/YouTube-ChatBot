@@ -60,11 +60,19 @@ const Sidebar = (() => {
   function hide() {
     if (host) host.remove();
   }
+  // Show a one-line status . isErrro turns it red .
+
+  function setStatus(text , isError= false){
+    if(!host) return;
+    els.status.textContent = text ;
+    els.status.classList.toggle("error" , isError);
+  }
+
 
   // YouTube re-renders its page and the window can be resized: re-check the placement regularly.
   function keepAttached() {
     if (host) mount();
   }
 
-  return { show, hide, keepAttached, els };
+  return { show, hide,setStatus , keepAttached, els };
 })();

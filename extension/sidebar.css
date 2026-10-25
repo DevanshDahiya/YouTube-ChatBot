@@ -58,3 +58,7 @@
 .status {
   color: var(--muted);
 }
+
+.status.error {
+  color: #d93025;
+}
