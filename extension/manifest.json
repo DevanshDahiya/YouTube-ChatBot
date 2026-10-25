@@ -1,0 +1,13 @@
+{
+    "manifest_version": 3,
+    "name": "YouTube ChatBot",
+    "version" : "0.1.0" ,
+    "description" : "Ask questions about a YouTube video and jump to the exact moment.",
+    "content_scripts" : [
+        {
+            "matches" : ["https://www.youtube.com/*"],
+            "js" : ["content.js"],
+            "run_at": "document_idle"
+        }
+    ]
+}
