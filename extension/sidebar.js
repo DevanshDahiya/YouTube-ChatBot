@@ -1,4 +1,6 @@
+// Step 17: the sidebar shell. It lives inside a Shadow DOM so YouTube's CSS cannot restyle it.
 // content.js (same isolated world) calls Sidebar.show(videoId) / Sidebar.hide().
+// The CSS is embedded below, so the page never has to load a file from the extension.
 
 const SIDEBAR_CSS = `
 /* Everything here applies ONLY inside our Shadow DOM, so YouTube's CSS cannot touch it and ours cannot leak out. */
@@ -161,6 +163,33 @@ const SIDEBAR_CSS = `
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   border-radius: 10px;
+}
+
+.msg.assistant {
+  white-space: normal;
+}
+
+.msg .body {
+  white-space: pre-wrap;
+}
+
+.msg .related {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.msg .related-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.ts.inline {
+  display: inline;
+  padding: 0 5px;
+  margin: 0 1px;
 }
 
 .msg.user {
@@ -417,23 +446,77 @@ const Sidebar = (() => {
     scrollChat();
   }
 
+  // Turn "... [1:04] ... [1:02:05] ..." into text plus clickable timestamp buttons. Text only, never HTML.
+  const CITE_RE = /\[(\d{1,2}):(\d{2})(?::(\d{2}))?\]/g;
+
+  function renderWithLinks(container, text, onSeek) {
+    container.replaceChildren();
+    let last = 0;
+    for (const match of text.matchAll(CITE_RE)) {
+      if (match.index > last) container.append(document.createTextNode(text.slice(last, match.index)));
+      const [, a, b, c] = match;
+      const seconds = c !== undefined ? +a * 3600 + +b * 60 + +c : +a * 60 + +b;
+      const button = document.createElement("button");
+      button.className = "ts inline";
+      button.textContent = match[0].slice(1, -1); // "1:04" without the brackets
+      button.title = `Jump to ${button.textContent}`;
+      button.addEventListener("click", () => onSeek(seconds));
+      container.append(button);
+      last = match.index + match[0].length;
+    }
+    if (last < text.length) container.append(document.createTextNode(text.slice(last)));
+  }
+
   // Adds an empty assistant bubble and returns a small handle to fill it as the answer streams in.
   function startAssistantMessage() {
     const message = document.createElement("div");
     message.className = "msg assistant pending";
-    message.textContent = "Thinking...";
+    const body = document.createElement("div");
+    body.className = "body";
+    body.textContent = "Thinking...";
+    const related = document.createElement("div");
+    related.className = "related";
+    related.hidden = true;
+    message.append(body, related);
     els.messages.append(message);
     scrollChat();
     return {
+      // While streaming: plain text.
       setText(text) {
         message.classList.remove("pending");
-        message.textContent = text; // text only: the answer comes from a language model
+        body.textContent = text; // text only: the answer comes from a language model
+        scrollChat();
+      },
+      // The final, verified answer: timestamps become buttons.
+      setAnswer(text, onSeek) {
+        message.classList.remove("pending");
+        renderWithLinks(body, text, onSeek);
+        scrollChat();
+      },
+      // A row of "moments the answer was based on" (used when the model cited nothing).
+      setRelated(sources, onSeek) {
+        related.replaceChildren();
+        if (!sources || sources.length === 0) return;
+        const label = document.createElement("span");
+        label.className = "related-label";
+        label.textContent = "Related moments:";
+        related.append(label);
+        for (const source of sources) {
+          const button = document.createElement("button");
+          button.className = "ts";
+          button.textContent = source.ts;
+          button.title = source.snippet || `Jump to ${source.ts}`;
+          button.addEventListener("click", () => onSeek(source.start));
+          related.append(button);
+        }
+        related.hidden = false;
         scrollChat();
       },
       setError(text) {
         message.classList.remove("pending");
         message.classList.add("error");
-        message.textContent = text;
+        body.textContent = text;
+        related.hidden = true;
         scrollChat();
       },
       isPending: () => message.classList.contains("pending"),

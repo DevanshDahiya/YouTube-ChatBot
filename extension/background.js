@@ -1,6 +1,3 @@
-// Step 18: the service worker. It is the only part that talks to the backend.
-// Content scripts send it a message; it calls the API and sends back a plain result.
-
 // The service worker. It is the only part that talks to the backend.
 // Content scripts send it a message (or open a port for streaming); it calls the API and replies with plain results.
 

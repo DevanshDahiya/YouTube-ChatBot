@@ -1,5 +1,4 @@
 // Detects the current video, even though YouTube never reloads the page, and drives the sidebar.
-// Detects the current video, even though YouTube never reloads the page, and drives the sidebar.
 
 let currentVideoId = null;
 let activePort = null; // the open connection while an answer is streaming
@@ -78,14 +77,20 @@ function askQuestion(question) {
 
   let streamed = "";
   let gotFinal = false;
+  let sources = []; // the moments the backend retrieved for this question
   port.onMessage.addListener((event) => {
     if (port !== activePort) return; // an old stream: ignore it
-    if (event.type === "token") {
+    if (event.type === "sources") {
+      sources = event.sources || [];
+    } else if (event.type === "token") {
       streamed += event.text;
       answer.setText(streamed);
     } else if (event.type === "final") {
       gotFinal = true;
-      answer.setText(event.answer); // the citation-checked version replaces the raw stream
+      // The citation-checked version replaces the raw stream, and its [M:SS] marks become buttons.
+      answer.setAnswer(event.answer, seekTo);
+      // A small model sometimes cites nothing: then show the moments it was based on, labelled as such.
+      if (!event.citations || event.citations.length === 0) answer.setRelated(sources, seekTo);
       chatHistory.push({ role: "user", content: question }, { role: "assistant", content: event.answer });
     } else if (event.type === "error") {
       if (event.message) answer.setError(event.message);
