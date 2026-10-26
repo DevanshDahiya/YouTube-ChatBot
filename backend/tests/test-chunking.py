@@ -1,13 +1,14 @@
 from app.ingestion import chunk_transcript, fmt_ts
 
-def snippets(n=300 , step = 4.0):
-    return [{"text" : f"s{i}" , "start" : i*step , "duration": step} for i in range(n)]
+
+def snippets(n=300, step=4.0):
+    return [{"text": f"s{i}", "start": i * step, "duration": step} for i in range(n)]
+
 
 def test_chunks_start_at_real_caption_times_and_move_forward():
-    chunks = chunk_transcript(snippets() , window=75 , overlap=15)
-    assert chunks[0]["start"] == 0 
+    chunks = chunk_transcript(snippets(), window=75, overlap=15)
+    assert chunks[0]["start"] == 0
     starts = [c["start"] for c in chunks]
-
     assert starts == sorted(set(starts))  # strictly increasing: no stuck loop, no duplicates
     assert all(s % 4 == 0 for s in starts)  # always a real caption start
 
