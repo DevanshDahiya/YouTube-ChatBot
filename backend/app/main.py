@@ -4,7 +4,9 @@ import os
 from functools import lru_cache
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException
+import secrets
+
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -13,6 +15,16 @@ from .ingestion import IngestionError, get_embeddings, ingest
 from .rag import build_summary, stream_answer
 
 logger = logging.getLogger(__name__)
+
+
+
+def require_key(x_api_key: str | None = Header(default=None)):
+    """If API_KEY is set (deployed server), every request except /health must send the same value in X-API-Key.
+    Without it, anyone who finds the URL could spend your Gemini quota. Unset locally, so nothing changes there."""
+    expected = os.getenv("API_KEY")
+    if expected and not secrets.compare_digest(x_api_key or "", expected):
+        raise HTTPException(401, {"code": "unauthorized", "message": "Wrong or missing API key. Check API_KEY in extension/config.js."})
+
 
 app = FastAPI(title="YouTube Learning Assistant")
 
@@ -61,14 +73,16 @@ def friendly_error(e: Exception) -> str:
     """A message safe to show to the user. The real exception goes to the server log, not to the browser."""
     logger.exception("Request failed")
     text = f"{type(e).__name__} {e}".lower()
+    if any(w in text for w in ("503", "504", "deadline", "overloaded", "unavailable")):
+        return "The model service is busy or slow right now. Please try again in a moment."
     if any(w in text for w in ("connect", "refused", "timeout", "timed out")):
         return "Can't reach the language model. If you use Ollama, is it running?"
     if any(w in text for w in ("api key", "api_key", "permission", "unauthenticated", "401", "403")):
         return "The model service rejected the API key. Check GOOGLE_API_KEY."
     if any(w in text for w in ("429", "quota", "rate limit", "resource exhausted")):
         return "The model service is busy (rate limit). Wait a minute and try again."
-    if "not found" in text and "model" in text:
-        return "The language model isn't available. Check the model name in the settings."
+    if "not_found" in text or "not found" in text or "no longer available" in text:
+        return "The language model name isn't available. Update GEMINI_CHAT_MODEL."
     return "Something went wrong while answering. Please try again."
 
 
@@ -77,7 +91,7 @@ def health():
     return {"ok": True}
 
 
-@app.post("/ingest")
+@app.post("/ingest", dependencies=[Depends(require_key)])
 def ingest_route(req: IngestRequest):
     # A plain `def` route: FastAPI runs it in a worker thread, so slow embedding doesn't block the server.
     try:
@@ -101,7 +115,7 @@ def event_stream(video_id: str, question: str, history: list[dict]):
         yield sse({"type": "error", "message": friendly_error(e)})
 
 
-@app.post("/ask")
+@app.post("/ask", dependencies=[Depends(require_key)])
 def ask_route(req: AskRequest):
     # Make sure the video is ready first (instant if cached). Errors here are normal HTTP errors.
     try:
@@ -117,7 +131,7 @@ def ask_route(req: AskRequest):
     )
 
 
-@app.get("/summary/{video_id}")
+@app.get("/summary/{video_id}", dependencies=[Depends(require_key)])
 def summary_route(video_id: str):
     # The first call for a video can take a while (one model call per section); later calls are cached.
     try:

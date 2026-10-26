@@ -1,0 +1,10 @@
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.env
+data
+data-gemini
+tests
+*.json
+try_models.py

@@ -64,6 +64,22 @@ ANSWER_PROMPT = ChatPromptTemplate.from_messages(
 logger = logging.getLogger(__name__)
 
 
+def text_of(content) -> str:
+    """Model replies are a plain string with Ollama, but a LIST of blocks with newer Gemini versions:
+    [{"type": "text", "text": "..."}, ...]. Always return plain text; ignore non-text blocks (e.g. 'thinking')."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type", "text") == "text":
+                parts.append(block.get("text", ""))
+        return "".join(parts)
+    return str(content or "")
+
+
 def history_messages(chat_history: list[dict] | None) -> list:
     """Last few chat messages as LangChain messages, each cut short so they never crowd out the excerpts."""
     out = []
@@ -139,7 +155,7 @@ def answer(video_id: str, question: str, embeddings, llm=None, chat_history=None
     reply = chain.invoke(
         {"context": format_context(docs), "question": question, "history": history_messages(chat_history)}
     )
-    checked = verify_citations(reply.content, docs)
+    checked = verify_citations(text_of(reply.content), docs)
     return {
         "answer": checked["text"],
         "citations": checked["citations"],  # seconds the player can seek to
@@ -167,9 +183,10 @@ def stream_answer(video_id: str, question: str, embeddings, llm=None, chat_histo
     parts: list[str] = []
     inputs = {"context": format_context(docs), "question": question, "history": history_messages(chat_history)}
     for chunk in chain.stream(inputs):
-        if chunk.content:
-            parts.append(chunk.content)
-            yield {"type": "token", "text": chunk.content}
+        piece = text_of(chunk.content)
+        if piece:
+            parts.append(piece)
+            yield {"type": "token", "text": piece}
 
     checked = verify_citations("".join(parts), docs)
     yield {
@@ -218,11 +235,11 @@ def build_summary(video_id: str, llm=None, on_progress=None) -> dict:
                 on_progress(i, len(sections))
             text = " ".join(sec["text"].split()[:MAX_SECTION_WORDS])
             reply = (SECTION_PROMPT | llm).invoke({"text": text})
-            for b in _bullets(reply.content)[:2]:
+            for b in _bullets(text_of(reply.content))[:2]:
                 key_points.append({"start": int(sec["start"]), "ts": fmt_ts(sec["start"]), "text": b})
 
         notes = "\n".join(f"- {k['text']}" for k in key_points)
-        overview = (OVERVIEW_PROMPT | llm).invoke({"notes": notes}).content.strip()
+        overview = text_of((OVERVIEW_PROMPT | llm).invoke({"notes": notes}).content).strip()
 
         summary = {"overview": overview, "key_points": key_points}
         cache.save_summary(video_id, summary)

@@ -1,7 +1,12 @@
 // The service worker. It is the only part that talks to the backend.
 // Content scripts send it a message (or open a port for streaming); it calls the API and replies with plain results.
 
-const BACKEND_URL = "http://127.0.0.1:8000"; // swapped for the deployed URL on Day 3
+importScripts("config.js"); // defines BACKEND_URL and API_KEY
+
+// Headers for every request. The key is only sent when one is configured.
+function headers(extra = {}) {
+  return API_KEY ? { ...extra, "X-API-Key": API_KEY } : extra;
+}
 
 // Turn a failed HTTP response into {code, message}.
 // Our backend sends {"detail": {"code", "message"}}. FastAPI's own validation errors send a LIST of problems.
@@ -17,14 +22,14 @@ function toError(status, body) {
 
 const UNREACHABLE = {
   code: "backend_unreachable",
-  message: "Can't reach the backend. Is it running on 127.0.0.1:8000?",
+  message: "Can't reach the backend. Is the server running and is BACKEND_URL in config.js right?",
 };
 
 // One-shot requests. Always resolves to {ok: true, data} or {ok: false, error: {code, message}}. Never throws.
 async function api(path, options) {
   let response;
   try {
-    response = await fetch(BACKEND_URL + path, options);
+    response = await fetch(BACKEND_URL + path, { ...options, headers: headers(options && options.headers) });
   } catch {
     return { ok: false, error: UNREACHABLE };
   }
@@ -87,7 +92,7 @@ async function streamAnswer(port, { videoId, question, history }) {
   try {
     const response = await fetch(BACKEND_URL + "/ask", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: headers({ "Content-Type": "application/json" }),
       body: JSON.stringify({ video_id: videoId, question, chat_history: history || [] }),
       signal: controller.signal,
     });

@@ -539,7 +539,6 @@ const Sidebar = (() => {
     noticeTimer = setTimeout(() => (els.notice.textContent = ""), 3500);
   }
 
-  // ---- Chat (Step 20) ----
 
   function onAsk(handler) {
     askHandler = handler;

@@ -11,7 +11,9 @@ OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
 OLLAMA_CHAT_MODEL = "qwen2.5:3b"
 OLLAMA_EMBED_MODEL = "mxbai-embed-large"
 
-GEMINI_CHAT_MODEL = os.getenv("GEMINI_CHAT_MODEL", "gemini-2.5-flash")
+GEMINI_CHAT_MODEL = os.getenv("GEMINI_CHAT_MODEL", "gemini-3.5-flash-lite")
+# Used automatically when the main model errors or times out. Set it empty to turn the fallback off.
+GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.1-flash-lite")
 GEMINI_EMBED_MODEL = os.getenv("GEMINI_EMBED_MODEL", "models/gemini-embedding-001")
 
 NUM_CTX = 4096  # Ollama only: its default window can silently cut the prompt
@@ -29,14 +31,20 @@ def get_chat_model(max_tokens: int | None = None):
     if PROVIDER == "gemini":
         from langchain_google_genai import ChatGoogleGenerativeAI
 
-        return ChatGoogleGenerativeAI(
-            model=GEMINI_CHAT_MODEL,
-            google_api_key=_gemini_key(),
-            temperature=0,
-            max_output_tokens=max_tokens,
-            max_retries=3,  # the free tier rate-limits (HTTP 429): wait and retry instead of failing
-            timeout=120,
-        )
+        def make(model: str):
+            return ChatGoogleGenerativeAI(
+                model=model,
+                google_api_key=_gemini_key(),
+                temperature=0,
+                # no output cap here: newer Gemini models "think" first, and thinking counts against a cap
+                max_retries=1,  # fail over quickly instead of waiting through several slow retries
+                timeout=45,
+            )
+
+        main = make(GEMINI_CHAT_MODEL)
+        if GEMINI_FALLBACK_MODEL and GEMINI_FALLBACK_MODEL != GEMINI_CHAT_MODEL:
+            return main.with_fallbacks([make(GEMINI_FALLBACK_MODEL)])
+        return main
     if PROVIDER == "ollama":
         from langchain_ollama import ChatOllama
 

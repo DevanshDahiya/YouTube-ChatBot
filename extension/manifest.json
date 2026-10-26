@@ -1,13 +1,14 @@
 {
   "manifest_version": 3,
-  "name": "YouTube Learning Assistant",
+  "name": "YouTube ChatBot",
   "version": "0.1.0",
   "description": "Ask questions about a YouTube video and jump to the exact moment.",
   "background": {
     "service_worker": "background.js"
   },
   "host_permissions": [
-    "http://127.0.0.1:8000/*"
+    "http://127.0.0.1:8000/*",
+    "https://*.onrender.com/*"
   ],
   "content_scripts": [
     {
