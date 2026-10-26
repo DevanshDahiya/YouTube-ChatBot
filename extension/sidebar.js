@@ -57,6 +57,79 @@ const SIDEBAR_CSS = `
   font-size: 16px;
 }
 
+.title {
+  display: flex;
+  flex-direction: column;
+}
+
+.actions {
+  display: flex;
+  gap: 4px;
+}
+
+.icon-btn {
+  padding: 2px 8px;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.icon-btn:hover {
+  color: var(--text);
+  background: var(--soft);
+}
+
+.icon-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Collapsed: only the header stays visible. */
+.panel.collapsed {
+  min-height: 0;
+}
+
+.panel.collapsed .header {
+  margin-bottom: 0;
+}
+
+.panel.collapsed > :not(.header) {
+  display: none;
+}
+
+/* A small spinner in front of a status line that is still working. */
+.busy::before,
+.msg.pending .body::before {
+  content: "";
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 6px;
+  vertical-align: -1px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .busy::before,
+  .msg.pending .body::before {
+    animation-duration: 3s;
+  }
+}
+
 .video-id {
   font-size: 12px;
   font-weight: 400;
@@ -256,6 +329,7 @@ const SIDEBAR_CSS = `
 const Sidebar = (() => {
   let host = null; // the element we put in the page
   let askHandler = null; // called with the question text when the user sends one
+  let newChatHandler = null; // called when the user presses "New chat"
   const els = {}; // references to parts we update later
 
   // Put our CSS inside the shadow root. A constructed stylesheet is not affected by the page's
@@ -272,6 +346,27 @@ const Sidebar = (() => {
     }
   }
 
+  // Remembered per browser as a convenience only; the sidebar works without it.
+  function readCollapsed() {
+    try {
+      return localStorage.getItem("yt-assistant-collapsed") === "1";
+    } catch {
+      return false;
+    }
+  }
+
+  function setCollapsed(collapsed) {
+    els.panel.classList.toggle("collapsed", collapsed);
+    els.collapse.textContent = collapsed ? "+" : "\u2212";
+    els.collapse.title = collapsed ? "Expand" : "Collapse";
+    els.collapse.setAttribute("aria-expanded", String(!collapsed));
+    try {
+      localStorage.setItem("yt-assistant-collapsed", collapsed ? "1" : "0");
+    } catch {
+      // storage can be blocked: ignore
+    }
+  }
+
   function build() {
     host = document.createElement("div");
     host.id = "yt-assistant-host";
@@ -281,8 +376,14 @@ const Sidebar = (() => {
     panel.className = "panel";
     panel.innerHTML = `
       <div class="header">
-        <span>Learning Assistant</span>
-        <span class="video-id"></span>
+        <span class="title">
+          <span>Learning Assistant</span>
+          <span class="video-id"></span>
+        </span>
+        <span class="actions">
+          <button type="button" class="icon-btn new-chat" title="Start a new chat" disabled>New chat</button>
+          <button type="button" class="icon-btn collapse" title="Collapse" aria-expanded="true">\u2212</button>
+        </span>
       </div>
       <div class="status">Sidebar loaded.</div>
       <div class="notice"></div>
@@ -315,6 +416,13 @@ const Sidebar = (() => {
     els.form = panel.querySelector(".composer");
     els.input = panel.querySelector(".composer textarea");
     els.send = panel.querySelector(".composer button");
+    els.panel = panel;
+    els.newChat = panel.querySelector(".new-chat");
+    els.collapse = panel.querySelector(".collapse");
+
+    els.newChat.addEventListener("click", () => newChatHandler && newChatHandler());
+    els.collapse.addEventListener("click", () => setCollapsed(!els.panel.classList.contains("collapsed")));
+    setCollapsed(readCollapsed());
 
     // YouTube has keyboard shortcuts (space, k, f, m, arrows...). Keep what we type from reaching them.
     for (const type of ["keydown", "keyup", "keypress"]) {
@@ -379,18 +487,21 @@ const Sidebar = (() => {
   }
 
   // Show a one-line status. isError turns it red.
-  function setStatus(text, isError = false) {
+  // busy adds a spinner in front of the text.
+  function setStatus(text, isError = false, busy = false) {
     if (!host) return;
     els.status.textContent = text;
     els.status.classList.toggle("error", isError);
+    els.status.classList.toggle("busy", busy);
   }
 
   // The line under the status that says "Summarizing..." or shows an error. Empty text hides it.
-  function setSummaryStatus(text, isError = false) {
+  function setSummaryStatus(text, isError = false, busy = false) {
     if (!host) return;
     els.summaryStatus.textContent = text;
     els.summaryStatus.hidden = !text;
     els.summaryStatus.classList.toggle("error", isError);
+    els.summaryStatus.classList.toggle("busy", busy);
   }
 
   // Show {overview, key_points: [{start, ts, text}]}, or pass null to clear. onSeek(seconds) runs on a timestamp click.
@@ -434,6 +545,10 @@ const Sidebar = (() => {
     askHandler = handler;
   }
 
+  function onNewChat(handler) {
+    newChatHandler = handler;
+  }
+
   function scrollChat() {
     els.messages.scrollTop = els.messages.scrollHeight;
   }
@@ -443,6 +558,7 @@ const Sidebar = (() => {
     message.className = "msg user";
     message.textContent = text; // text only, never HTML
     els.messages.append(message);
+    els.newChat.disabled = false;
     scrollChat();
   }
 
@@ -526,6 +642,7 @@ const Sidebar = (() => {
 
   function clearChat() {
     els.messages.replaceChildren();
+    els.newChat.disabled = true;
   }
 
   // Turn the input on or off. `hint` is the grey text shown inside it while it is off.
@@ -549,6 +666,8 @@ const Sidebar = (() => {
     setSummary,
     notice,
     onAsk,
+    onNewChat,
+    clearChat,
     addUserMessage,
     startAssistantMessage,
     setChatEnabled,

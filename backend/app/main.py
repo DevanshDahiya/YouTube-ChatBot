@@ -62,9 +62,13 @@ def friendly_error(e: Exception) -> str:
     logger.exception("Request failed")
     text = f"{type(e).__name__} {e}".lower()
     if any(w in text for w in ("connect", "refused", "timeout", "timed out")):
-        return "Can't reach the language model. Is Ollama running?"
+        return "Can't reach the language model. If you use Ollama, is it running?"
+    if any(w in text for w in ("api key", "api_key", "permission", "unauthenticated", "401", "403")):
+        return "The model service rejected the API key. Check GOOGLE_API_KEY."
+    if any(w in text for w in ("429", "quota", "rate limit", "resource exhausted")):
+        return "The model service is busy (rate limit). Wait a minute and try again."
     if "not found" in text and "model" in text:
-        return "The language model isn't installed. Run: ollama pull qwen2.5:3b"
+        return "The language model isn't available. Check the model name in the settings."
     return "Something went wrong while answering. Please try again."
 
 

@@ -8,14 +8,11 @@ import time
 from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_ollama import ChatOllama
 
-from . import cache
-from .ingestion import OLLAMA_URL, chunk_transcript, fmt_ts, get_embeddings, get_vectorstore
+from . import cache, providers
+from .ingestion import chunk_transcript, fmt_ts, get_embeddings, get_vectorstore
 
 TOP_K = 5  # how many chunks to retrieve per question
-LLM_MODEL = "qwen2.5:3b"  # `ollama pull qwen2.5:3b`
-NUM_CTX = 4096            # context window; Ollama's default can be too small and silently cuts the prompt
 
 SYSTEM_PROMPT = """You answer questions about ONE YouTube video using ONLY the transcript excerpts below.
 Each excerpt starts with its timestamp in square brackets.
@@ -131,17 +128,8 @@ def verify_citations(text: str, docs: list[Document]) -> dict:
     return {"text": cleaned, "citations": sorted(valid), "invalid": invalid}
 
 
-def get_llm(max_tokens: int | None = None) -> ChatOllama:
-    # temperature=0: we want the answer that follows the excerpts, not a creative one.
-    # num_predict caps the output length (stops a looping model); the timeout stops a hung call.
-    return ChatOllama(
-        model=LLM_MODEL,
-        base_url=OLLAMA_URL,
-        temperature=0,
-        num_ctx=NUM_CTX,
-        num_predict=max_tokens,
-        client_kwargs={"timeout": 180},
-    )
+def get_llm(max_tokens: int | None = None):
+    return providers.get_chat_model(max_tokens)
 
 
 def answer(video_id: str, question: str, embeddings, llm=None, chat_history=None) -> dict:

@@ -49,10 +49,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }).then(sendResponse);
     return true; // tells Chrome we will reply later, so keep the message channel open
   }
-  if (message.type === "summary") {
-    api(`/summary/${encodeURIComponent(message.videoId)}`).then(sendResponse);
-    return true;
-  }
   return false;
 });
 
@@ -129,7 +125,22 @@ async function streamAnswer(port, { videoId, question, history }) {
   }
 }
 
+// The summary can take minutes the first time. A one-shot message would let Chrome stop this worker after ~30s
+// of silence, so it runs over a port that sends a ping every 20s until the reply is ready.
+async function runSummary(port, { videoId }) {
+  let open = true;
+  port.onDisconnect.addListener(() => (open = false));
+  const keepAlive = setInterval(() => open && port.postMessage({ type: "ping" }), 20000);
+  try {
+    const result = await api(`/summary/${encodeURIComponent(videoId)}`);
+    if (open) port.postMessage({ type: "result", result });
+  } finally {
+    clearInterval(keepAlive);
+    if (open) port.postMessage({ type: "closed" });
+  }
+}
+
 chrome.runtime.onConnect.addListener((port) => {
-  if (port.name !== "ask") return;
-  port.onMessage.addListener((message) => streamAnswer(port, message));
+  if (port.name === "ask") port.onMessage.addListener((message) => streamAnswer(port, message));
+  else if (port.name === "summary") port.onMessage.addListener((message) => runSummary(port, message));
 });

@@ -4,6 +4,7 @@ let currentVideoId = null;
 let activePort = null; // the open connection while an answer is streaming
 let chatHistory = []; // [{role: "user" | "assistant", content}] for the current video
 let videoReady = false; // true once the backend has finished preparing this video
+let summaryPort = null; // the open connection while the summary is being made
 
 function getVideoId() {
   const url = new URL(location.href);
@@ -38,16 +39,66 @@ function seekTo(seconds) {
   video.play().catch(() => {}); // a click counts as a user gesture, so this is normally allowed
 }
 
-async function loadSummary(videoId) {
-  Sidebar.setSummaryStatus("Summarizing... the first time can take a few minutes.");
-  const result = await callBackground({ type: "summary", videoId });
-  if (videoId !== currentVideoId) return; // you moved on while we waited
-  if (result.ok) {
-    Sidebar.setSummaryStatus("");
-    Sidebar.setSummary(result.data, seekTo);
-  } else {
-    Sidebar.setSummaryStatus(result.error.message, true);
+// Asks for the summary through a long-lived port (see background.js: it keeps the worker alive while we wait).
+function loadSummary(videoId) {
+  closeSummaryPort();
+  Sidebar.setSummaryStatus("Summarizing... the first time can take a few minutes.", false, true);
+
+  let port;
+  try {
+    port = chrome.runtime.connect({ name: "summary" });
+  } catch {
+    Sidebar.setSummaryStatus("The extension was reloaded. Refresh this page.", true);
+    return;
   }
+  summaryPort = port;
+  let gotResult = false;
+
+  port.onMessage.addListener((message) => {
+    if (port !== summaryPort || videoId !== currentVideoId) return; // you moved on while we waited
+    if (message.type === "result") {
+      gotResult = true;
+      if (message.result.ok) {
+        Sidebar.setSummaryStatus("");
+        Sidebar.setSummary(message.result.data, seekTo);
+      } else {
+        Sidebar.setSummaryStatus(message.result.error.message, true);
+      }
+    } else if (message.type === "closed") {
+      if (!gotResult) Sidebar.setSummaryStatus("The summary was interrupted. Reload the page to retry.", true);
+      closeSummaryPort();
+    }
+  });
+  port.onDisconnect.addListener(() => {
+    if (port === summaryPort) {
+      summaryPort = null;
+      if (!gotResult && videoId === currentVideoId) Sidebar.setSummaryStatus("The summary was interrupted. Reload the page to retry.", true);
+    }
+  });
+  port.postMessage({ videoId });
+}
+
+function closeSummaryPort() {
+  if (!summaryPort) return;
+  const port = summaryPort;
+  summaryPort = null; // set first so the disconnect handler does not report an error
+  try {
+    port.disconnect();
+  } catch {
+    // already closed
+  }
+}
+
+// "New chat": stop any answer in progress, forget the conversation, empty the chat box.
+function newChat() {
+  if (activePort) {
+    const port = activePort;
+    activePort = null;
+    port.disconnect();
+  }
+  chatHistory = [];
+  Sidebar.clearChat();
+  Sidebar.setChatEnabled(videoReady, "This video isn't ready.");
 }
 
 // Called when the chat is over (answer finished, failed, or was cut off).
@@ -109,7 +160,7 @@ function askQuestion(question) {
 }
 
 async function prepareVideo(videoId) {
-  Sidebar.setStatus("Preparing this video...");
+  Sidebar.setStatus("Preparing this video...", false, true);
   const result = await callBackground({ type: "ingest", videoId });
   if (videoId !== currentVideoId) return; // you moved to another video while we waited: drop this answer
   if (result.ok) {
@@ -132,6 +183,7 @@ function onVideoChanged(videoId) {
     activePort = null;
     port.disconnect(); // tells the background worker to stop reading the old answer
   }
+  closeSummaryPort();
   chatHistory = [];
   videoReady = false;
   if (videoId) {
@@ -150,6 +202,7 @@ function checkVideo() {
 }
 
 Sidebar.onAsk(askQuestion);
+Sidebar.onNewChat(newChat);
 
 // 1) YouTube fires this on `document` every time its in-page navigation finishes.
 document.addEventListener("yt-navigate-finish", checkVideo);

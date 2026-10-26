@@ -1,5 +1,6 @@
 """Step 1: validate a video ID and fetch its transcript from YouTube."""
 import logging
+import os
 import re
 import sys
 import threading
@@ -7,7 +8,6 @@ import time
 
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
-from langchain_ollama import OllamaEmbeddings
 from youtube_transcript_api import (
     IpBlocked,
     NoTranscriptFound,
@@ -17,15 +17,13 @@ from youtube_transcript_api import (
     YouTubeTranscriptApi,
 )
 
-from . import cache
+from . import cache, providers
 
 logger = logging.getLogger(__name__)
 
 WINDOW_SECONDS = 75  # target chunk length
 OVERLAP_SECONDS = 15  # how much consecutive chunks share
-EMBED_MODEL = "mxbai-embed-large"  # `ollama pull mxbai-embed-large`
-OLLAMA_URL = "http://127.0.0.1:11434"
-CHROMA_DIR = "./data/chroma"  # where vectors are saved on disk
+CHROMA_DIR = os.path.join(providers.DATA_DIR, "chroma")  # where vectors are saved on disk
 LANGUAGES = ["en", "en-US", "en-GB", "hi"]  # preferred caption languages, in priority order
 MAX_VIDEO_SECONDS = 4 * 3600  # longer videos are refused: embedding and summarizing them locally takes too long
 EMBED_BATCH = 32  # chunks embedded per request, so a long video is not one giant request
@@ -143,8 +141,8 @@ def chunks_to_documents(video_id: str, chunks: list[dict]) -> list[Document]:
     ]
 
 
-def get_embeddings() -> OllamaEmbeddings:
-    return OllamaEmbeddings(model=EMBED_MODEL, base_url=OLLAMA_URL)
+def get_embeddings():
+    return providers.get_embedding_model()
 
 
 def collection_name(video_id: str) -> str:
@@ -194,7 +192,7 @@ def ingest(video_id: str, embeddings) -> dict:
             logger.exception("Embedding failed for %s", video_id)
             raise IngestionError(
                 "embedding_failed",
-                f"Couldn't create embeddings. Is Ollama running, and is {EMBED_MODEL} installed?",
+                "Couldn't create embeddings. Check that the embedding service is running and the API key is valid.",
             ) from e
 
         # Written LAST: if anything above failed, the video is not marked done and the next call retries.

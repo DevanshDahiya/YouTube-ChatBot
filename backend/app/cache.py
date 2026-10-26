@@ -5,7 +5,7 @@ import sqlite3
 import time
 from contextlib import contextmanager
 
-CACHE_DB = "./data/cache.sqlite"
+CACHE_DB = os.path.join(os.getenv("DATA_DIR", "./data"), "cache.sqlite")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS videos (

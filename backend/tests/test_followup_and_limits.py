@@ -1,3 +1,4 @@
+"""Steps 23-24: follow-up questions, validation, hardening."""
 import itertools
 
 import pytest
