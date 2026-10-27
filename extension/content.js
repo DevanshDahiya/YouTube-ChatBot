@@ -171,64 +171,44 @@ function askQuestion(question) {
 //
 // Returns [{text, start, duration}, ...] or null on any failure.
 // If null is returned, the backend will attempt its own fetch — which may be blocked on cloud hosts.
-async function fetchPageTranscript() {
+// Parses YouTube's xml3 / srv3 (<timedtext><p t="..." d="...">) or legacy (<text start="..." dur="...">) format.
+function parseXmlTranscript(xmlText) {
   try {
-    const videoId = currentVideoId;
-    let player = null;
-    const marker = "ytInitialPlayerResponse = ";
-
-    // 1. Try inline scripts already present in the DOM (avoids a full page re-fetch on first load).
-    for (const script of document.querySelectorAll("script:not([src])")) {
-      const text = script.textContent;
-      const at = text.indexOf(marker);
-      if (at === -1) continue;
-      const jsonStart = at + marker.length;
-      let depth = 0, end = -1;
-      for (let i = jsonStart; i < text.length; i++) {
-        if (text[i] === "{") depth++;
-        else if (text[i] === "}") { if (--depth === 0) { end = i + 1; break; } }
+    const doc = new DOMParser().parseFromString(xmlText, "text/xml");
+    const pTags = doc.querySelectorAll("p");
+    if (pTags && pTags.length > 0) {
+      const snippets = [];
+      for (const p of pTags) {
+        const text = p.textContent.replace(/\n/g, " ").trim();
+        if (!text) continue;
+        const start = (parseFloat(p.getAttribute("t")) || 0) / 1000;
+        const duration = (parseFloat(p.getAttribute("d")) || 0) / 1000;
+        snippets.push({ text, start, duration });
       }
-      if (end === -1) continue;
-      try {
-        const p = JSON.parse(text.slice(jsonStart, end));
-        // Guard: the inline data can be stale after SPA navigation — only use it for the right video.
-        if (p?.videoDetails?.videoId === videoId) { player = p; break; }
-      } catch { /* malformed block — try the next script tag */ }
+      if (snippets.length > 0) return snippets;
     }
-
-    // 2. DOM data was missing or for a different video — fetch the page fresh.
-    if (!player) {
-      const html = await (await fetch(location.href, { credentials: "same-origin" })).text();
-      const at = html.indexOf(marker);
-      if (at === -1) return null;
-      const jsonStart = at + marker.length;
-      let depth = 0, end = -1;
-      for (let i = jsonStart; i < html.length; i++) {
-        if (html[i] === "{") depth++;
-        else if (html[i] === "}") { if (--depth === 0) { end = i + 1; break; } }
+    const textTags = doc.querySelectorAll("text");
+    if (textTags && textTags.length > 0) {
+      const snippets = [];
+      for (const t of textTags) {
+        const text = t.textContent.replace(/\n/g, " ").trim();
+        if (!text) continue;
+        const start = parseFloat(t.getAttribute("start")) || 0;
+        const duration = parseFloat(t.getAttribute("dur")) || 0;
+        snippets.push({ text, start, duration });
       }
-      if (end === -1) return null;
-      try { player = JSON.parse(html.slice(jsonStart, end)); } catch { return null; }
+      if (snippets.length > 0) return snippets;
     }
+  } catch (err) {
+    console.warn("[YT ChatBot] XML transcript parsing failed:", err);
+  }
+  return null;
+}
 
-    const tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-    if (!tracks || tracks.length === 0) return null;
-
-    // Prefer English, and prefer hand-made captions over auto-generated ("asr") ones.
-    const score = (t) => (t.languageCode?.startsWith("en") ? 2 : 0) + (t.kind !== "asr" ? 1 : 0);
-    const track = [...tracks].sort((a, b) => score(b) - score(a))[0];
-
-    // Fetch the caption file. No explicit credentials= needed — same-origin is the default.
-    // Retry without fmt=json3 if the server rejects it (some tracks only serve the default format).
-    let captionResponse = await fetch(track.baseUrl + "&fmt=json3");
-    if (!captionResponse.ok) {
-      captionResponse = await fetch(track.baseUrl);
-      if (!captionResponse.ok) {
-        console.warn("[YT ChatBot] Caption URL returned", captionResponse.status, "— will let backend try.");
-        return null;
-      }
-    }
-    const data = await captionResponse.json();
+// Parses YouTube's json3 format ({ events: [ { segs: [ { utf8: ... } ], tStartMs, dDurationMs } ] }).
+function parseJsonTranscript(jsonText) {
+  try {
+    const data = typeof jsonText === "string" ? JSON.parse(jsonText) : jsonText;
     const snippets = (data.events || [])
       .filter((e) => e.segs && e.segs.length)
       .map((e) => ({
@@ -241,15 +221,140 @@ async function fetchPageTranscript() {
         duration: (e.dDurationMs || 0) / 1000,
       }))
       .filter((s) => s.text);
+    return snippets.length > 0 ? snippets : null;
+  } catch (err) {
+    console.warn("[YT ChatBot] JSON transcript parsing failed:", err);
+  }
+  return null;
+}
 
-    if (snippets.length > 0) {
-      console.log("[YT ChatBot] Browser fetched", snippets.length, "transcript snippets — backend will not call YouTube.");
+// 1. Fetch tracks using YouTube's Innertube API (client: ANDROID).
+// This is a same-origin request from YouTube tab, and unlike web player URLs, Android track URLs
+// do NOT require a web PO-token (&exp=xpe) which causes YouTube to return empty responses.
+async function fetchTracksFromInnertube(videoId) {
+  try {
+    const res = await fetch("https://www.youtube.com/youtubei/v1/player", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        context: { client: { clientName: "ANDROID", clientVersion: "20.10.38" } },
+        videoId: videoId,
+      }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data?.captions?.playerCaptionsTracklistRenderer?.captionTracks || null;
+  } catch {
+    return null;
+  }
+}
+
+// 2. Fallback: read tracks from ytInitialPlayerResponse in DOM or fresh page HTML.
+async function fetchTracksFromPlayerResponse(videoId) {
+  const marker = "ytInitialPlayerResponse = ";
+  for (const script of document.querySelectorAll("script:not([src])")) {
+    const text = script.textContent;
+    const at = text.indexOf(marker);
+    if (at === -1) continue;
+    const jsonStart = at + marker.length;
+    let depth = 0, end = -1;
+    for (let i = jsonStart; i < text.length; i++) {
+      if (text[i] === "{") depth++;
+      else if (text[i] === "}") { if (--depth === 0) { end = i + 1; break; } }
+    }
+    if (end === -1) continue;
+    try {
+      const p = JSON.parse(text.slice(jsonStart, end));
+      if (p?.videoDetails?.videoId === videoId) {
+        const tracks = p?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+        if (tracks && tracks.length > 0) return tracks;
+      }
+    } catch { /* malformed */ }
+  }
+
+  try {
+    const html = await (await fetch(location.href, { credentials: "same-origin" })).text();
+    const at = html.indexOf(marker);
+    if (at === -1) return null;
+    const jsonStart = at + marker.length;
+    let depth = 0, end = -1;
+    for (let i = jsonStart; i < html.length; i++) {
+      if (html[i] === "{") depth++;
+      else if (html[i] === "}") { if (--depth === 0) { end = i + 1; break; } }
+    }
+    if (end === -1) return null;
+    const p = JSON.parse(html.slice(jsonStart, end));
+    return p?.captions?.playerCaptionsTracklistRenderer?.captionTracks || null;
+  } catch {
+    return null;
+  }
+}
+
+// Reads the transcript directly from the YouTube page environment.
+// Returns [{text, start, duration}, ...] or null.
+async function fetchPageTranscript() {
+  try {
+    const videoId = currentVideoId;
+    if (!videoId) return null;
+
+    // 1. Get caption tracks (Innertube first, DOM fallback second)
+    let tracks = await fetchTracksFromInnertube(videoId);
+    if (!tracks || tracks.length === 0) {
+      tracks = await fetchTracksFromPlayerResponse(videoId);
+    }
+    if (!tracks || tracks.length === 0) return null;
+
+    // Prefer English, then prefer hand-made captions over auto-generated ("asr") ones.
+    const score = (t) => (t.languageCode?.startsWith("en") ? 2 : 0) + (t.kind !== "asr" ? 1 : 0);
+    const track = [...tracks].sort((a, b) => score(b) - score(a))[0];
+    if (!track?.baseUrl) return null;
+
+    // 2. Fetch the transcript data.
+    // Try json3 format first (replacing any fmt=srv3).
+    let json3Url = track.baseUrl;
+    if (json3Url.includes("fmt=")) {
+      json3Url = json3Url.replace(/fmt=[^&]+/, "fmt=json3");
+    } else {
+      json3Url += "&fmt=json3";
+    }
+
+    let rawText = "";
+    try {
+      const resp = await fetch(json3Url);
+      if (resp.ok) rawText = (await resp.text()).trim();
+    } catch { /* retry with base url below */ }
+
+    // If json3 returned empty or failed, fetch the base URL directly (returns srv3 / XML)
+    if (!rawText) {
+      const resp = await fetch(track.baseUrl);
+      if (resp.ok) rawText = (await resp.text()).trim();
+    }
+
+    if (!rawText) {
+      console.warn("[YT ChatBot] Caption body was empty for video:", videoId);
+      return null;
+    }
+
+    // 3. Parse JSON or XML based on format
+    let snippets = null;
+    if (rawText.startsWith("{")) {
+      snippets = parseJsonTranscript(rawText);
+    } else if (rawText.startsWith("<")) {
+      snippets = parseXmlTranscript(rawText);
+    } else {
+      // Try JSON first then XML
+      snippets = parseJsonTranscript(rawText) || parseXmlTranscript(rawText);
+    }
+
+    if (snippets && snippets.length > 0) {
+      console.log(`[YT ChatBot] Successfully fetched ${snippets.length} transcript snippets directly from page.`);
       return snippets;
     }
+
     return null;
   } catch (err) {
-    console.warn("[YT ChatBot] fetchPageTranscript failed:", err);
-    return null; // backend will attempt its own fetch (may be blocked on cloud hosts)
+    console.warn("[YT ChatBot] fetchPageTranscript error:", err);
+    return null;
   }
 }
 
