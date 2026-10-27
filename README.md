@@ -14,31 +14,8 @@ trust.
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    subgraph Browser["Chrome Extension (Manifest V3)"]
-        CS["Content script<br/>Shadow-DOM sidebar"]
-        BG["Background service worker"]
-        CS <-->|chrome.runtime port| BG
-    end
+<img width="1473" height="422" alt="image" src="https://github.com/user-attachments/assets/708f1674-018d-4f8d-ab17-199c5eb8a404" />
 
-    subgraph Backend["FastAPI Backend"]
-        API["/ingest · /ask · /summary"]
-        RAG["Retrieval + grounded prompt<br/>citation verification"]
-        Cache[("SQLite cache<br/>videos + summaries")]
-        Vec[("Chroma<br/>one collection per video")]
-    end
-
-    YT["YouTube page<br/>(captions read client-side)"]
-    LLM["LLM provider<br/>Ollama (local) or Gemini (hosted)<br/>+ fallback model"]
-
-    CS -- "reads transcript from the page itself" --> YT
-    BG -- "HTTPS + X-API-Key" --> API
-    API --> RAG
-    RAG --> Vec
-    RAG --> LLM
-    API --> Cache
-```
 
 **Why the transcript is read in the browser, not the server:** YouTube blocks transcript requests
 from most cloud/datacenter IPs (Render, Railway, AWS, …), so a server trying to fetch transcripts
