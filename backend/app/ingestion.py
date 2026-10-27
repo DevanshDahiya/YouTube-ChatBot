@@ -28,6 +28,11 @@ LANGUAGES = ["en", "en-US", "en-GB", "hi"]  # preferred caption languages, in pr
 MAX_VIDEO_SECONDS = 4 * 3600  # longer videos are refused: embedding and summarizing them locally takes too long
 EMBED_BATCH = 32  # chunks embedded per request, so a long video is not one giant request
 
+# When True the server refuses to call YouTube directly and requires the browser extension to supply
+# the transcript. Set REQUIRE_BROWSER_TRANSCRIPT=true in your Render (or any cloud host) environment
+# variables to get a clear error instead of a silent IP-blocked failure.
+REQUIRE_BROWSER_TRANSCRIPT = os.getenv("REQUIRE_BROWSER_TRANSCRIPT", "false").lower() == "true"
+
 _locks: dict[str, threading.Lock] = {}  # one lock per video
 _VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
@@ -188,6 +193,13 @@ def ingest(video_id: str, embeddings, transcript: list[dict] | None = None) -> d
             snippets = [s for s in transcript if s.get("text", "").strip()]
             if not snippets:
                 raise IngestionError("no_captions", "The transcript sent by the extension was empty.")
+        elif REQUIRE_BROWSER_TRANSCRIPT:
+            raise IngestionError(
+                "blocked",
+                "YouTube blocks direct requests from this server's IP. "
+                "Make sure the browser extension is installed and active on the YouTube tab "
+                "— it reads captions directly from the page and sends them here.",
+            )
         else:
             snippets = fetch_transcript(video_id)
 

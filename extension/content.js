@@ -161,32 +161,56 @@ function askQuestion(question) {
 
 // Reads the transcript straight from the YouTube page itself (same origin: YouTube never blocks this),
 // so the backend does not have to ask YouTube and risk being blocked (common on cloud/free hosts).
-// Returns [{text, start, duration}, ...] or null if it could not be read (the backend then tries itself).
+//
+// Strategy:
+//   1. Read ytInitialPlayerResponse from inline <script> tags already in the DOM — fast, no extra
+//      request, and correct even after YouTube's in-page navigation fires.
+//   2. If the DOM data belongs to a different video (stale after SPA navigation), re-fetch the page.
+//   3. Fetch the actual caption file using the track URL found in the player response.
+//      Try fmt=json3 first; fall back to the raw URL if that fails.
+//
+// Returns [{text, start, duration}, ...] or null on any failure.
+// If null is returned, the backend will attempt its own fetch — which may be blocked on cloud hosts.
 async function fetchPageTranscript() {
   try {
-    const html = await (await fetch(location.href, { credentials: "same-origin" })).text();
+    const videoId = currentVideoId;
+    let player = null;
     const marker = "ytInitialPlayerResponse = ";
-    const markerAt = html.indexOf(marker);
-    if (markerAt === -1) return null;
 
-    // The player response is one big JSON object inlined in the page; find where it ends by
-    // counting braces (a regex cannot safely match nested braces).
-    const jsonStart = markerAt + marker.length;
-    let depth = 0;
-    let end = -1;
-    for (let i = jsonStart; i < html.length; i++) {
-      if (html[i] === "{") depth++;
-      else if (html[i] === "}") {
-        depth--;
-        if (depth === 0) {
-          end = i + 1;
-          break;
-        }
+    // 1. Try inline scripts already present in the DOM (avoids a full page re-fetch on first load).
+    for (const script of document.querySelectorAll("script:not([src])")) {
+      const text = script.textContent;
+      const at = text.indexOf(marker);
+      if (at === -1) continue;
+      const jsonStart = at + marker.length;
+      let depth = 0, end = -1;
+      for (let i = jsonStart; i < text.length; i++) {
+        if (text[i] === "{") depth++;
+        else if (text[i] === "}") { if (--depth === 0) { end = i + 1; break; } }
       }
+      if (end === -1) continue;
+      try {
+        const p = JSON.parse(text.slice(jsonStart, end));
+        // Guard: the inline data can be stale after SPA navigation — only use it for the right video.
+        if (p?.videoDetails?.videoId === videoId) { player = p; break; }
+      } catch { /* malformed block — try the next script tag */ }
     }
-    if (end === -1) return null;
 
-    const player = JSON.parse(html.slice(jsonStart, end));
+    // 2. DOM data was missing or for a different video — fetch the page fresh.
+    if (!player) {
+      const html = await (await fetch(location.href, { credentials: "same-origin" })).text();
+      const at = html.indexOf(marker);
+      if (at === -1) return null;
+      const jsonStart = at + marker.length;
+      let depth = 0, end = -1;
+      for (let i = jsonStart; i < html.length; i++) {
+        if (html[i] === "{") depth++;
+        else if (html[i] === "}") { if (--depth === 0) { end = i + 1; break; } }
+      }
+      if (end === -1) return null;
+      try { player = JSON.parse(html.slice(jsonStart, end)); } catch { return null; }
+    }
+
     const tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
     if (!tracks || tracks.length === 0) return null;
 
@@ -194,7 +218,16 @@ async function fetchPageTranscript() {
     const score = (t) => (t.languageCode?.startsWith("en") ? 2 : 0) + (t.kind !== "asr" ? 1 : 0);
     const track = [...tracks].sort((a, b) => score(b) - score(a))[0];
 
-    const captionResponse = await fetch(track.baseUrl + "&fmt=json3", { credentials: "same-origin" });
+    // Fetch the caption file. No explicit credentials= needed — same-origin is the default.
+    // Retry without fmt=json3 if the server rejects it (some tracks only serve the default format).
+    let captionResponse = await fetch(track.baseUrl + "&fmt=json3");
+    if (!captionResponse.ok) {
+      captionResponse = await fetch(track.baseUrl);
+      if (!captionResponse.ok) {
+        console.warn("[YT ChatBot] Caption URL returned", captionResponse.status, "— will let backend try.");
+        return null;
+      }
+    }
     const data = await captionResponse.json();
     const snippets = (data.events || [])
       .filter((e) => e.segs && e.segs.length)
@@ -208,9 +241,15 @@ async function fetchPageTranscript() {
         duration: (e.dDurationMs || 0) / 1000,
       }))
       .filter((s) => s.text);
-    return snippets.length > 0 ? snippets : null;
-  } catch {
-    return null; // any problem here: the backend falls back to fetching the transcript itself
+
+    if (snippets.length > 0) {
+      console.log("[YT ChatBot] Browser fetched", snippets.length, "transcript snippets — backend will not call YouTube.");
+      return snippets;
+    }
+    return null;
+  } catch (err) {
+    console.warn("[YT ChatBot] fetchPageTranscript failed:", err);
+    return null; // backend will attempt its own fetch (may be blocked on cloud hosts)
   }
 }
 
@@ -218,6 +257,13 @@ async function prepareVideo(videoId) {
   Sidebar.setStatus("Preparing this video...", false, true);
   const transcript = await fetchPageTranscript();
   if (videoId !== currentVideoId) return; // you moved to another video while this was reading the page
+  if (!transcript) {
+    // fetchPageTranscript() failed or the video has no captions the extension could read.
+    // The backend will try to fetch the transcript itself — this will fail on cloud hosts
+    // (Render, Railway, …) because YouTube blocks requests from their IP ranges.
+    // If REQUIRE_BROWSER_TRANSCRIPT=true is set on the server, a clear error will be returned.
+    console.warn("[YT ChatBot] Could not read transcript from page — backend will attempt its own fetch (may be blocked on cloud hosts).");
+  }
   const result = await callBackground({ type: "ingest", videoId, transcript });
   if (videoId !== currentVideoId) return; // you moved to another video while we waited: drop this answer
   if (result.ok) {
