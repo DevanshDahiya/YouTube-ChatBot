@@ -50,7 +50,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     api("/ingest", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ video_id: message.videoId }),
+      body: JSON.stringify({ video_id: message.videoId, transcript: message.transcript || undefined }),
     }).then(sendResponse);
     return true; // tells Chrome we will reply later, so keep the message channel open
   }

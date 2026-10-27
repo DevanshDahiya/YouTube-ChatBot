@@ -159,9 +159,66 @@ function askQuestion(question) {
   port.postMessage({ videoId, question, history: chatHistory.slice(-6) });
 }
 
+// Reads the transcript straight from the YouTube page itself (same origin: YouTube never blocks this),
+// so the backend does not have to ask YouTube and risk being blocked (common on cloud/free hosts).
+// Returns [{text, start, duration}, ...] or null if it could not be read (the backend then tries itself).
+async function fetchPageTranscript() {
+  try {
+    const html = await (await fetch(location.href, { credentials: "same-origin" })).text();
+    const marker = "ytInitialPlayerResponse = ";
+    const markerAt = html.indexOf(marker);
+    if (markerAt === -1) return null;
+
+    // The player response is one big JSON object inlined in the page; find where it ends by
+    // counting braces (a regex cannot safely match nested braces).
+    const jsonStart = markerAt + marker.length;
+    let depth = 0;
+    let end = -1;
+    for (let i = jsonStart; i < html.length; i++) {
+      if (html[i] === "{") depth++;
+      else if (html[i] === "}") {
+        depth--;
+        if (depth === 0) {
+          end = i + 1;
+          break;
+        }
+      }
+    }
+    if (end === -1) return null;
+
+    const player = JSON.parse(html.slice(jsonStart, end));
+    const tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+    if (!tracks || tracks.length === 0) return null;
+
+    // Prefer English, and prefer hand-made captions over auto-generated ("asr") ones.
+    const score = (t) => (t.languageCode?.startsWith("en") ? 2 : 0) + (t.kind !== "asr" ? 1 : 0);
+    const track = [...tracks].sort((a, b) => score(b) - score(a))[0];
+
+    const captionResponse = await fetch(track.baseUrl + "&fmt=json3", { credentials: "same-origin" });
+    const data = await captionResponse.json();
+    const snippets = (data.events || [])
+      .filter((e) => e.segs && e.segs.length)
+      .map((e) => ({
+        text: e.segs
+          .map((s) => s.utf8 || "")
+          .join("")
+          .replace(/\n/g, " ")
+          .trim(),
+        start: (e.tStartMs || 0) / 1000,
+        duration: (e.dDurationMs || 0) / 1000,
+      }))
+      .filter((s) => s.text);
+    return snippets.length > 0 ? snippets : null;
+  } catch {
+    return null; // any problem here: the backend falls back to fetching the transcript itself
+  }
+}
+
 async function prepareVideo(videoId) {
   Sidebar.setStatus("Preparing this video...", false, true);
-  const result = await callBackground({ type: "ingest", videoId });
+  const transcript = await fetchPageTranscript();
+  if (videoId !== currentVideoId) return; // you moved to another video while this was reading the page
+  const result = await callBackground({ type: "ingest", videoId, transcript });
   if (videoId !== currentVideoId) return; // you moved to another video while we waited: drop this answer
   if (result.ok) {
     const { chunks, cached } = result.data;
@@ -213,3 +270,4 @@ setInterval(() => {
 }, 1000);
 // 3) The page we landed on at load time.
 checkVideo();
+ 

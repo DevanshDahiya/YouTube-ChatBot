@@ -1,4 +1,4 @@
-"""Step 1: validate a video ID and fetch its transcript from YouTube."""
+"""Fetch a YouTube transcript, chunk it by time, embed the chunks into a per-video Chroma collection."""
 import logging
 import os
 import re
@@ -168,8 +168,14 @@ def store_documents(video_id: str, docs: list[Document], embeddings) -> int:
     return len(docs)
 
 
-def ingest(video_id: str, embeddings) -> dict:
-    """The whole pipeline, with caching. Safe to call many times for the same video."""
+def ingest(video_id: str, embeddings, transcript: list[dict] | None = None) -> dict:
+    """The whole pipeline, with caching. Safe to call many times for the same video.
+
+    If `transcript` is given (the extension read it from the YouTube page itself), it is used as-is and
+    YouTube is never asked directly. This is what lets a deployed server work even when YouTube blocks
+    its IP: only the user's own browser talks to YouTube. If `transcript` is None, the server fetches it
+    itself, same as before (used locally, and by the evaluation script).
+    """
     validate_video_id(video_id)
 
     # Two requests for the same NEW video must not both embed it: the second waits, then hits the cache.
@@ -178,7 +184,12 @@ def ingest(video_id: str, embeddings) -> dict:
         if cached:  # already done: no YouTube request, no embedding
             return {"video_id": video_id, "cached": True, "chunks": cached["chunk_count"]}
 
-        snippets = fetch_transcript(video_id)
+        if transcript:
+            snippets = [s for s in transcript if s.get("text", "").strip()]
+            if not snippets:
+                raise IngestionError("no_captions", "The transcript sent by the extension was empty.")
+        else:
+            snippets = fetch_transcript(video_id)
 
         duration = snippets[-1]["start"] + snippets[-1]["duration"]
         if duration > MAX_VIDEO_SECONDS:

@@ -15,6 +15,9 @@ def env(monkeypatch, tmp_path):
     """Fresh temp database and vector store for every test. Returns a dict that counts YouTube fetches."""
     monkeypatch.setattr(ingestion, "CHROMA_DIR", str(tmp_path / "chroma"))
     monkeypatch.setattr(cache, "CACHE_DB", str(tmp_path / "cache.sqlite"))
+    # Tests must not depend on whatever is in the developer's real .env (e.g. a deployed API_KEY):
+    # unset it here so every test starts from the same, unauthenticated-locally baseline.
+    monkeypatch.delenv("API_KEY", raising=False)
 
     calls = {"fetch": 0}
 

@@ -50,8 +50,17 @@ def embeddings():
     return get_embeddings()  # created once, reused by every request
 
 
+class TranscriptSnippet(BaseModel):
+    text: str = Field(max_length=500)
+    start: float = Field(ge=0)
+    duration: float = Field(ge=0, le=3600)
+
+
 class IngestRequest(BaseModel):
     video_id: str
+    # Sent by the extension, which reads captions from the YouTube page itself so the server never has
+    # to ask YouTube directly (YouTube blocks many cloud/datacenter IPs, including most free hosts).
+    transcript: list[TranscriptSnippet] | None = Field(default=None, max_length=20000)
 
 
 class ChatMessage(BaseModel):
@@ -94,8 +103,9 @@ def health():
 @app.post("/ingest", dependencies=[Depends(require_key)])
 def ingest_route(req: IngestRequest):
     # A plain `def` route: FastAPI runs it in a worker thread, so slow embedding doesn't block the server.
+    transcript = [s.model_dump() for s in req.transcript] if req.transcript else None
     try:
-        return ingest(req.video_id, embeddings())
+        return ingest(req.video_id, embeddings(), transcript=transcript)
     except IngestionError as e:
         raise http_error(e)
 
